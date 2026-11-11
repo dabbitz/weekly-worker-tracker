@@ -8,10 +8,13 @@ from aiogram.types import Message
 from dotenv import load_dotenv
 
 from app.services.ai_service import WorkUpdateExtractor
+from app.services.date_normalizer import (
+    normalize_eta_date,
+    EtaResolutionStatus,
+)
 from app.schemas.work_update import WorkStatus
 
 
-# Load environment variables
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,10 +31,8 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing.")
 
 
-# Initialize dispatcher
 dp = Dispatcher()
 
-# AI service will be initialized when the bot starts
 extractor: WorkUpdateExtractor | None = None
 
 
@@ -40,7 +41,7 @@ STATUS_LABELS = {
     WorkStatus.IN_PROGRESS: "Devam ediyor",
     WorkStatus.BLOCKED: "Engellendi",
     WorkStatus.NOT_STARTED: "Henüz başlanmadı",
-    WorkStatus.UNKNOWN: "Belirsiz"
+    WorkStatus.UNKNOWN: "Belirsiz",
 }
 
 
@@ -50,11 +51,9 @@ async def start_handler(message: Message):
     await message.answer(
         "Merhaba!\n\n"
         "Haftalık İş Takip Sistemi demo botuna hoş geldin.\n\n"
-        "Artık gönderdiğin iş güncellemelerini "
-        "yapay zekâ ile analiz edebilirim.\n\n"
-        "Örneğin:\n"
-        "\"Elektrik tesisatının %70'ini tamamladık. "
-        "Malzeme eksikliği nedeniyle kalan kısmı bitiremedik.\""
+        "İş güncellemelerini doğal dilde gönderebilirsin. "
+        "Yapay zekâ mesajlarını analiz ederek yapılandırılmış "
+        "iş güncellemelerine dönüştürecek."
     )
 
 
@@ -65,6 +64,17 @@ async def help_handler(message: Message):
         "İş güncellemelerini doğal dilde gönderebilirsin.\n\n"
         "/start - Botu başlat\n"
         "/help - Yardım mesajını göster"
+    )
+
+
+@dp.message(Command("myid"))
+async def myid_handler(message: Message):
+
+    if message.from_user is None:
+        return
+
+    await message.answer(
+        f"Telegram User ID: {message.from_user.id}"
     )
 
 
@@ -82,18 +92,25 @@ async def text_handler(message: Message):
     )
 
     try:
+        # 1. Extract structured information using Gemini
+
         result = await extractor.extract(message.text)
 
-        status_label = STATUS_LABELS.get(
-            result.status,
-            "Belirsiz"
+        # 2. Normalize the expected completion date
+        # using the original Telegram message timestamp.
+
+        eta_result = normalize_eta_date(
+            eta_text=result.reported_eta_text,
+            reference_datetime=message.date,
         )
+
+        # 3. Build the response
 
         lines = [
             "İŞ GÜNCELLEMESİ ANALİZİ",
             "",
-            f"İş: {result.task_name or 'Belirtilmedi'}",
-            f"Durum: {status_label}",
+            f"İş: {result.task_reference_text or 'Belirtilmedi'}",
+            f"Durum: {STATUS_LABELS.get(result.status, 'Belirsiz')}",
         ]
 
         if result.completion_percentage is not None:
@@ -114,23 +131,54 @@ async def text_handler(message: Message):
                 f"Sonraki adım: {result.next_step}"
             )
 
-        if result.expected_completion:
+        # 4. Display normalized ETA
+
+        lines.append("")
+
+        if eta_result.status == EtaResolutionStatus.RESOLVED:
+
+            normalized_date = eta_result.normalized_date
+
             lines.append(
-                f"Tahmini tamamlanma: {result.expected_completion}"
+                f"Çalışanın bitiş ifadesi: {result.reported_eta_text}"
             )
+
+            lines.append(
+                "Normalize edilmiş tahmini bitiş: "
+                f"{normalized_date.strftime('%d.%m.%Y')}"
+            )
+
+        elif eta_result.status == EtaResolutionStatus.MISSING:
+
+            lines.append(
+                "Tahmini bitiş: Çalışan tarafından belirtilmedi."
+            )
+
+        else:
+
+            lines.append(
+                f"Çalışanın bitiş ifadesi: "
+                f"{result.reported_eta_text}"
+            )
+
+            lines.append(
+                "Tahmini bitiş tarihi netleştirilmeli."
+            )
+
+        # 5. Summary
 
         lines.extend([
             "",
             "ÖZET",
             result.summary,
             "",
-            "Bu, yapay zekâ tarafından oluşturulmuş "
-            "bir analizdir."
+            "Bu analiz henüz veritabanına kaydedilmedi."
         ])
 
         await message.answer("\n".join(lines))
 
     except Exception:
+
         logging.exception("Work update analysis failed.")
 
         await message.answer(
@@ -162,6 +210,7 @@ async def main():
     )
 
     try:
+
         async with Bot(token=BOT_TOKEN) as bot:
 
             logging.info("Telegram bot is starting...")
@@ -170,6 +219,7 @@ async def main():
             await dp.start_polling(bot)
 
     finally:
+
         await extractor.close()
         logging.info("AI service closed.")
 

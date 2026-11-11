@@ -4,3 +4,4 @@ google-genai
 sqlalchemy[asyncio]
 asyncpg
 alembic
+tzdata
