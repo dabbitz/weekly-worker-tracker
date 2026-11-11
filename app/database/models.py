@@ -95,6 +95,91 @@ class Employee(Base):
 
 
 # ==========================================
+# REGISTRATION REQUESTS
+# ==========================================
+
+class RegistrationRequest(Base):
+
+    __tablename__ = "registration_requests"
+
+    __table_args__ = (
+
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_registration_requests_status"
+        ),
+
+        # Only one pending request per Telegram account.
+        # A new request is allowed after rejection.
+
+        Index(
+            "uq_registration_requests_pending_user",
+            "telegram_user_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'")
+        ),
+
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True
+    )
+
+    telegram_user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False
+    )
+
+    telegram_chat_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False
+    )
+
+    requested_full_name: Mapped[str] = mapped_column(
+        String(150),
+        nullable=False
+    )
+
+    # Link to an existing employee if this is a reactivation request.
+    # Otherwise, a new employee will be created after approval.
+
+    employee_id: Mapped[int | None] = mapped_column(
+        ForeignKey("employees.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    notification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    reviewed_by_telegram_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True
+    )
+
+
+
+# ==========================================
 # PROJECTS
 # ==========================================
 
