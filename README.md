@@ -1,6 +1,6 @@
 # Weekly Work Tracker
 
-A Telegram bot that turns free-form work updates from office and construction site employees into clean, structured data using Google Gemini — and stores them in a PostgreSQL (Neon) database.
+A Telegram bot that turns free-form work updates from office and construction site employees into clean, structured data using Google Gemini, plus a Turkish-first administrator dashboard for managing projects, employees, tasks, assignments, and weekly plans on a PostgreSQL (Neon) database.
 
 > "We completed about 70% of the electrical installation this week. We couldn't finish the rest because of a cable supply issue. If the materials arrive tomorrow, we plan to finish by Friday."
 >
@@ -31,6 +31,9 @@ A Telegram bot that turns free-form work updates from office and construction si
 - **Review workflow ready** — updates support `pending` / `approved` / `rejected` states.
 - **Integration ready** — updates carry a `sync_status` for future external system sync.
 - **Async everywhere** — `aiogram`, SQLAlchemy async engine, and `asyncpg`.
+- **Admin dashboard** — Turkish-first React interface backed by a FastAPI API and the same PostgreSQL database.
+- **Real data only** — no seeded demo records or fabricated metrics.
+- **Derived project teams** — employees are associated with projects through task assignments, not a separate membership table.
 
 ---
 
@@ -72,20 +75,34 @@ flowchart LR
 ```text
 weekly-work-tracker/
 ├── app/
+│   ├── api/
+│   │   ├── main.py              # FastAPI entry point
+│   │   ├── config.py            # Dashboard environment settings
+│   │   ├── dependencies.py      # Bearer auth and DB session dependencies
+│   │   └── routes/              # Auth, dashboard, projects, employees, tasks, plans
 │   ├── database/
-│   │   ├── connection.py      # Async engine & session factory
-│   │   ├── models.py          # ORM models
-│   │   └── repositories.py    # Data access layer (in progress)
-│   ├── schemas/
-│   │   └── work_update.py     # WorkUpdate / WorkStatus schemas
-│   └── services/
-│       └── ai_service.py      # Gemini extraction service
-├── init_db.py                 # Creates database tables
-├── main.py                    # Telegram bot entry point
-├── test_ai.py                 # Manual AI extraction test
-├── test_db.py                 # Manual database connectivity test
+│   │   ├── connection.py        # Async engine & session factory
+│   │   └── models.py            # ORM models
+│   ├── schemas/                 # Pydantic request/response models
+│   └── services/                # Business logic shared by the API and the bot
+├── frontend/
+│   ├── src/
+│   │   ├── api/                 # REST client and endpoint functions
+│   │   ├── components/          # UI and feature components
+│   │   ├── hooks/               # Authentication context
+│   │   ├── layouts/             # Sidebar/header application shell
+│   │   ├── pages/               # Dashboard routes
+│   │   ├── types/               # Shared TypeScript DTOs
+│   │   └── App.tsx              # Router and providers
+│   └── package.json
+├── tests/                       # Automated backend tests
+├── scripts/
+│   └── hash_admin_password.py   # Argon2 password hash helper
+├── init_db.py                   # Creates database tables
+├── main.py                      # Telegram bot entry point
 ├── requirements.txt
-└── .env                       # Local secrets (not committed)
+├── .env                         # Local secrets (not committed)
+└── .env.example
 ```
 
 ---
@@ -137,9 +154,30 @@ GEMINI_MODEL=gemini-3.5-flash-lite
 # PostgreSQL (Neon)
 DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
 DATABASE_URL_POOLED=postgresql://user:password@host/dbname?sslmode=require
+
+# Telegram administrator (bot approval flow; not a dashboard login)
+ADMIN_TELEGRAM_ID=123456789
+
+# Admin dashboard
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=replace-with-an-argon2-hash
+AUTH_SECRET=replace-with-at-least-32-random-characters
+ACCESS_TOKEN_EXPIRE_MINUTES=480
+# FRONTEND_ORIGIN=https://your-dashboard.example.com
 ```
 
 > **Note:** `GEMINI_MODEL` is optional and defaults to `gemini-3.5-flash-lite`.
+>
+> Generate the dashboard password hash without putting the plaintext
+> password in a file:
+>
+> ```bash
+> python scripts/hash_admin_password.py
+> ```
+>
+> Copy the printed Argon2 hash into `ADMIN_PASSWORD_HASH`. Keep
+> `ADMIN_TELEGRAM_ID` separate from `ADMIN_USERNAME`; they authenticate
+> different channels. `AUTH_SECRET` must be at least 32 characters.
 
 ### 5. Initialize the database
 
@@ -154,6 +192,65 @@ python main.py
 ```
 
 Open your bot in Telegram and send `/start`.
+
+### 7. Run the admin API
+
+```bash
+# Windows (PowerShell)
+.\.venv\Scripts\python.exe -m uvicorn app.api.main:app --reload --port 8000
+
+# macOS / Linux
+.venv/bin/python -m uvicorn app.api.main:app --reload --port 8000
+```
+
+The API is available at `http://127.0.0.1:8000`, interactive docs at
+`http://127.0.0.1:8000/docs`, and the health check at
+`http://127.0.0.1:8000/api/health`.
+
+### 8. Run the frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` and sign in with the configured
+`ADMIN_USERNAME` and password. The frontend reads
+`VITE_API_BASE_URL`, which defaults to `http://127.0.0.1:8000/api`.
+It is a public build-time value only; never put secrets in `VITE_*`
+variables.
+
+---
+
+## Admin Dashboard
+
+The dashboard is a separate process from the Telegram bot and connects
+to the same Neon database through the FastAPI backend.
+
+| Page | Purpose |
+| --- | --- |
+| Genel Bakış | Real project, active employee, task, and pending registration counts |
+| Projeler | Create, search, and edit projects; open project detail |
+| Proje Detayı | Project metadata, tasks, and employees derived from task assignments |
+| Çalışanlar | Search employees and open employee detail |
+| Çalışan Detayı | Assigned tasks and projects derived through those assignments |
+| Görevler | Create/edit tasks and assign multiple employees |
+| Haftalık Planlar | Define weekly targets and target completion percentages per task |
+| Kayıt Talepleri | Read-only Telegram registration history; decisions stay in Telegram |
+| Raporlar | Clearly marked later-phase report plan with no fabricated metrics |
+
+Key behavior:
+
+- Projects can exist without tasks or employees.
+- A task may have multiple assignees through `task_assignments`.
+- Inactive employees cannot be newly assigned to a task.
+- Project teams are derived from `tasks → task_assignments → employees`;
+  there is no `project_memberships` table.
+- Weekly plan targets are separate from a task's planned start/due dates.
+- Dashboard authentication uses an Argon2 password hash and a signed,
+  expiring JWT. Every admin endpoint except login and health requires a
+  bearer token.
 
 ---
 
@@ -234,7 +331,23 @@ erDiagram
 
 ## Testing
 
-The project includes two manual smoke tests:
+### Automated backend tests
+
+```bash
+# Windows (PowerShell)
+.\.venv\Scripts\python.exe -m pytest tests -q
+
+# macOS / Linux
+.venv/bin/python -m pytest tests -q
+```
+
+The suite runs against isolated, randomly named PostgreSQL schemas on
+the configured Neon database and removes them afterwards. It does not
+modify rows in the `public` schema.
+
+### Manual smoke tests
+
+The project also includes two manual smoke tests:
 
 ```bash
 # Verify the database connection
@@ -246,6 +359,14 @@ python test_ai.py
 
 Both scripts load configuration from `.env` and exit cleanly, disposing of connections.
 
+### Frontend checks
+
+```bash
+cd frontend
+npm run build
+npm run lint
+```
+
 ---
 
 ## Security Notes
@@ -254,6 +375,10 @@ Both scripts load configuration from `.env` and exit cleanly, disposing of conne
 - The AI system instruction explicitly rejects prompt-injection attempts inside employee messages.
 - Database identifiers are always generated by the backend; the model is never asked to produce them.
 - SSL is enabled for database connections by default.
+- The dashboard stores only an Argon2 password hash and signs short-lived JWTs with `AUTH_SECRET`.
+- Dashboard tokens are kept in `sessionStorage`, and logout revokes the token ID.
+- CORS is limited to the local Vite origins; wildcard origins with credentials are not used.
+- Dashboard secrets are backend-only environment variables and never appear in `VITE_*` variables.
 
 ---
 
@@ -266,7 +391,7 @@ Both scripts load configuration from `.env` and exit cleanly, disposing of conne
 - [ ] Manager review flow (approve / reject updates)
 - [ ] External system synchronization
 - [ ] Alembic migrations instead of `create_all`
-- [ ] Automated test suite
+- [x] Automated backend test suite and Turkish admin dashboard
 
 ---
 

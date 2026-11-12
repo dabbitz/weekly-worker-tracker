@@ -6,6 +6,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database.connection import SessionLocal
 from app.database.models import Employee, RegistrationRequest
+from app.services.registration_service import (
+    review_registration_request_in_session,
+)
 
 
 async def create_registration_request(
@@ -108,89 +111,9 @@ async def review_registration_request(
 
     async with SessionLocal() as session:
 
-        result = await session.execute(
-            select(RegistrationRequest)
-            .where(RegistrationRequest.id == request_id)
-            .with_for_update()
-        )
-
-        request = result.scalar_one_or_none()
-
-        if request is None:
-            return None, None, "not_found"
-
-        # A request must only be reviewed once.
-
-        if request.status != "pending":
-            return request, None, "already_reviewed"
-
-        employee = None
-
-        if approve:
-
-            # Reactivate an existing employee if this
-            # is a reactivation request.
-
-            if request.employee_id is not None:
-
-                employee = await session.get(
-                    Employee,
-                    request.employee_id
-                )
-
-            # Otherwise, look up the Telegram account.
-
-            if employee is None:
-
-                employee_result = await session.execute(
-                    select(Employee).where(
-                        Employee.telegram_user_id
-                        == request.telegram_user_id
-                    )
-                )
-
-                employee = employee_result.scalar_one_or_none()
-
-            # Create a new employee if no account exists.
-
-            if employee is None:
-
-                employee = Employee(
-                    telegram_user_id=request.telegram_user_id,
-                    full_name=request.requested_full_name,
-                )
-
-                session.add(employee)
-
-            else:
-
-                employee.full_name = request.requested_full_name
-                employee.is_active = True
-
-            await session.flush()
-
-            request.employee_id = employee.id
-            request.status = "approved"
-
-        else:
-
-            request.status = "rejected"
-
-        request.reviewed_at = datetime.now(timezone.utc)
-
-        request.reviewed_by_telegram_user_id = (
-            admin_telegram_user_id
-        )
-
-        await session.commit()
-
-        await session.refresh(request)
-
-        if employee is not None:
-            await session.refresh(employee)
-
-        return (
-            request,
-            employee,
-            "approved" if approve else "rejected"
+        return await review_registration_request_in_session(
+            session=session,
+            request_id=request_id,
+            approve=approve,
+            reviewer_telegram_user_id=admin_telegram_user_id,
         )
