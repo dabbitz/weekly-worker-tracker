@@ -66,10 +66,22 @@ async def database(monkeypatch) -> TestDatabase:
     )
 
     # asyncpg ignores server_settings.search_path with Neon here, so apply
-    # the schema explicitly on every new pooled connection. This keeps tests
-    # fully isolated from the persistent public schema.
+    # the schema explicitly. The path is re-applied on every checkout
+    # because a connection that only ran read-only statements can lose a
+    # session-level SET when the pool rolls back on return. Re-applying it
+    # keeps every checkout on the isolated schema.
     @event.listens_for(test_engine.sync_engine, "connect")
     def _set_test_search_path(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute(f'SET search_path TO "{schema}"')
+        cursor.close()
+
+    @event.listens_for(test_engine.sync_engine, "checkout")
+    def _ensure_test_search_path(
+        dbapi_connection,
+        connection_record,
+        connection_proxy,
+    ):
         cursor = dbapi_connection.cursor()
         cursor.execute(f'SET search_path TO "{schema}"')
         cursor.close()

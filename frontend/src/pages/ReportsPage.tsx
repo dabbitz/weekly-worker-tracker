@@ -1,159 +1,601 @@
+import { useQuery } from '@tanstack/react-query'
 import {
-  ArrowRight,
-  BarChart3,
-  CalendarDays,
+  CheckCircle2,
   ClipboardList,
   Clock3,
-  FolderKanban,
-  ListChecks,
-  Users,
+  Eye,
+  Lock,
+  OctagonAlert,
+  TriangleAlert,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { useState } from 'react'
 
+import {
+  employeesApi,
+  projectsApi,
+  reportsApi,
+  tasksApi,
+} from '../api/endpoints'
+import { ReportDetailModal } from '../components/reports/ReportDetailModal'
 import { Alert } from '../components/ui/Alert'
 import { Badge } from '../components/ui/Badge'
-import { Card, CardHeader } from '../components/ui/Card'
+import { Button } from '../components/ui/Button'
+import { Card } from '../components/ui/Card'
+import { EmptyState } from '../components/ui/EmptyState'
+import { ErrorState } from '../components/ui/ErrorState'
+import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
+import { Pagination } from '../components/ui/Pagination'
+import { StatCard } from '../components/ui/StatCard'
+import {
+  formatDateTime,
+  getErrorMessage,
+  reportReviewStatusMeta,
+  workStatusMeta,
+} from '../lib/utils'
+import type { WorkStatus } from '../types'
 
-const plannedReports = [
-  'Görev bazlı haftalık hedef ve gerçekleşme karşılaştırması',
-  'Çalışan bazlı tamamlanan iş güncellemeleri',
-  'Proje bazlı haftalık ilerleme özeti',
-  'Onaylanan ve reddedilen iş güncellemelerinin dökümü',
+const PAGE_SIZE = 15
+
+const statusOptions: WorkStatus[] = [
+  'completed',
+  'in_progress',
+  'blocked',
+  'not_started',
+  'unknown',
 ]
 
-const dataSources = [
-  {
-    to: '/projeler',
-    label: 'Projeler',
-    description: 'Proje kayıtları, görev ve ekip sayıları',
-    icon: FolderKanban,
-  },
-  {
-    to: '/gorevler',
-    label: 'Görevler',
-    description: 'Planlanan tarihler ve çalışan atamaları',
-    icon: ListChecks,
-  },
-  {
-    to: '/haftalik-planlar',
-    label: 'Haftalık Planlar',
-    description: 'Haftalık hedefler ve hedef tamamlanma yüzdeleri',
-    icon: CalendarDays,
-  },
-  {
-    to: '/calisanlar',
-    label: 'Çalışanlar',
-    description: 'Aktif/pasif durum ve görev dağılımı',
-    icon: Users,
-  },
-]
+function completionTone(percentage: number | null) {
+  if (percentage === null) return 'neutral' as const
+  if (percentage >= 100) return 'success' as const
+  if (percentage >= 50) return 'info' as const
+  if (percentage > 0) return 'warning' as const
+  return 'neutral' as const
+}
 
 export function ReportsPage() {
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [projectId, setProjectId] = useState('')
+  const [employeeId, setEmployeeId] = useState('')
+  const [taskId, setTaskId] = useState('')
+  const [statusFilter, setStatusFilter] = useState<WorkStatus | ''>('')
+  const [blockerOnly, setBlockerOnly] = useState(false)
+  const [delayOnly, setDelayOnly] = useState(false)
+  const [page, setPage] = useState(1)
+  const [selectedReportId, setSelectedReportId] = useState<number | null>(
+    null,
+  )
+
+  const projectsQuery = useQuery({
+    queryKey: ['projects', 'options'],
+    queryFn: projectsApi.options,
+  })
+
+  const employeesQuery = useQuery({
+    queryKey: ['employees', 'list', 'report-filter'],
+    queryFn: () =>
+      employeesApi.list({ page: 1, page_size: 100 }),
+  })
+
+  const tasksQuery = useQuery({
+    queryKey: ['tasks', 'list', 'report-filter', projectId],
+    queryFn: () =>
+      tasksApi.list({
+        page: 1,
+        page_size: 100,
+        project_id: projectId ? Number(projectId) : undefined,
+      }),
+  })
+
+  const reportsQuery = useQuery({
+    queryKey: [
+      'reports',
+      'list',
+      page,
+      dateFrom,
+      dateTo,
+      projectId,
+      employeeId,
+      taskId,
+      statusFilter,
+      blockerOnly,
+      delayOnly,
+    ],
+    queryFn: () =>
+      reportsApi.list({
+        page,
+        page_size: PAGE_SIZE,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+        project_id: projectId ? Number(projectId) : undefined,
+        employee_id: employeeId ? Number(employeeId) : undefined,
+        task_id: taskId ? Number(taskId) : undefined,
+        status: statusFilter || undefined,
+        has_blocker: blockerOnly ? true : undefined,
+        has_delay: delayOnly ? true : undefined,
+      }),
+  })
+
+  const projects = projectsQuery.data ?? []
+  const employees = employeesQuery.data?.items ?? []
+  const tasks = tasksQuery.data?.items ?? []
+  const data = reportsQuery.data
+  const stats = data?.stats
+
+  const hasFilters = Boolean(
+    dateFrom ||
+      dateTo ||
+      projectId ||
+      employeeId ||
+      taskId ||
+      statusFilter ||
+      blockerOnly ||
+      delayOnly,
+  )
+
+  const handleProjectChange = (value: string) => {
+    setProjectId(value)
+    setTaskId('')
+    setPage(1)
+  }
+
+  const clearFilters = () => {
+    setDateFrom('')
+    setDateTo('')
+    setProjectId('')
+    setEmployeeId('')
+    setTaskId('')
+    setStatusFilter('')
+    setBlockerOnly(false)
+    setDelayOnly(false)
+    setPage(1)
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="Sonraki Aşama"
         title="Raporlar"
-        description="Haftalık performans raporları, gerçek iş güncellemeleri toplanmaya başladıktan sonra burada üretilecek."
-        actions={<Badge tone="warning">Planlanıyor</Badge>}
+        description="Çalışanların ilettiği ve AI ile yapılandırılan iş raporlarını inceleyin. Bu ekran salt okunurdur."
+        actions={<Badge tone="neutral">Salt okunur</Badge>}
       />
 
-      <Alert tone="info" title="Bu sayfada örnek veri gösterilmez">
-        WorkTrack, doğrulanmamış veya tahmini metrikler üretmez.
-        Raporlar yalnızca veritabanındaki gerçek görev, atama, haftalık
-        plan ve iş güncellemesi kayıtlarına dayanacaktır.
+      {reportsQuery.isError ? null : (
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+          <StatCard
+            label="Toplam rapor"
+            value={stats?.total ?? 0}
+            hint="Aktif filtrelerle eşleşen"
+            icon={ClipboardList}
+            tone="blue"
+            isLoading={reportsQuery.isLoading}
+          />
+          <StatCard
+            label="Engellenmiş işler"
+            value={stats?.blocked_count ?? 0}
+            hint="Durum: Engellendi"
+            icon={OctagonAlert}
+            tone="amber"
+            isLoading={reportsQuery.isLoading}
+          />
+          <StatCard
+            label="Engel bildirilen"
+            value={stats?.with_blocker_count ?? 0}
+            hint="Engel metni dolu"
+            icon={TriangleAlert}
+            tone="amber"
+            isLoading={reportsQuery.isLoading}
+          />
+          <StatCard
+            label="Gecikme bildirilen"
+            value={stats?.with_delay_count ?? 0}
+            hint="Gecikme nedeni dolu"
+            icon={Clock3}
+            tone="amber"
+            isLoading={reportsQuery.isLoading}
+          />
+          <StatCard
+            label="Tamamlanmış işler"
+            value={stats?.completed_count ?? 0}
+            hint="Durum: Tamamlandı"
+            icon={CheckCircle2}
+            tone="green"
+            isLoading={reportsQuery.isLoading}
+          />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-date-from"
+              className="text-xs font-medium text-slate-500"
+            >
+              Başlangıç tarihi
+            </label>
+            <input
+              id="report-date-from"
+              type="date"
+              value={dateFrom}
+              max={dateTo || undefined}
+              onChange={(event) => {
+                setDateFrom(event.target.value)
+                setPage(1)
+              }}
+              className="field-input w-full py-2 sm:w-40"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-date-to"
+              className="text-xs font-medium text-slate-500"
+            >
+              Bitiş tarihi
+            </label>
+            <input
+              id="report-date-to"
+              type="date"
+              value={dateTo}
+              min={dateFrom || undefined}
+              onChange={(event) => {
+                setDateTo(event.target.value)
+                setPage(1)
+              }}
+              className="field-input w-full py-2 sm:w-40"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-project-filter"
+              className="text-xs font-medium text-slate-500"
+            >
+              Proje
+            </label>
+            <select
+              id="report-project-filter"
+              value={projectId}
+              onChange={(event) =>
+                handleProjectChange(event.target.value)
+              }
+              className="field-input w-full py-2 sm:w-44"
+            >
+              <option value="">Tüm projeler</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-employee-filter"
+              className="text-xs font-medium text-slate-500"
+            >
+              Çalışan
+            </label>
+            <select
+              id="report-employee-filter"
+              value={employeeId}
+              onChange={(event) => {
+                setEmployeeId(event.target.value)
+                setPage(1)
+              }}
+              className="field-input w-full py-2 sm:w-44"
+            >
+              <option value="">Tüm çalışanlar</option>
+              {employees.map((employee) => (
+                <option key={employee.id} value={employee.id}>
+                  {employee.full_name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-task-filter"
+              className="text-xs font-medium text-slate-500"
+            >
+              Görev
+            </label>
+            <select
+              id="report-task-filter"
+              value={taskId}
+              onChange={(event) => {
+                setTaskId(event.target.value)
+                setPage(1)
+              }}
+              className="field-input w-full py-2 sm:w-52"
+            >
+              <option value="">Tüm görevler</option>
+              {tasks.map((task) => (
+                <option key={task.id} value={task.id}>
+                  {task.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="report-status-filter"
+              className="text-xs font-medium text-slate-500"
+            >
+              Durum
+            </label>
+            <select
+              id="report-status-filter"
+              value={statusFilter}
+              onChange={(event) => {
+                setStatusFilter(
+                  event.target.value as WorkStatus | '',
+                )
+                setPage(1)
+              }}
+              className="field-input w-full py-2 sm:w-40"
+            >
+              <option value="">Tüm durumlar</option>
+              {statusOptions.map((status) => (
+                <option key={status} value={status}>
+                  {workStatusMeta[status].label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-4 pb-1">
+            <label className="inline-flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={blockerOnly}
+                onChange={(event) => {
+                  setBlockerOnly(event.target.checked)
+                  setPage(1)
+                }}
+                className="h-4 w-4 rounded border-slate-300 text-worktrack-blue focus:ring-worktrack-blue/30"
+              />
+              Engel bildirenler
+            </label>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-600">
+              <input
+                type="checkbox"
+                checked={delayOnly}
+                onChange={(event) => {
+                  setDelayOnly(event.target.checked)
+                  setPage(1)
+                }}
+                className="h-4 w-4 rounded border-slate-300 text-worktrack-blue focus:ring-worktrack-blue/30"
+              />
+              Gecikme bildirenler
+            </label>
+          </div>
+
+          {hasFilters ? (
+            <Button variant="ghost" size="sm" onClick={clearFilters}>
+              Filtreleri temizle
+            </Button>
+          ) : null}
+        </div>
+
+        {data ? (
+          <p className="text-sm text-slate-500">{data.total} rapor</p>
+        ) : null}
+      </div>
+
+      <Alert tone="info" title="İki gösterge farklı şeyleri sayar">
+        <strong>Engellenmiş işler</strong> yalnızca durumu
+        <em> Engellendi </em> olan raporları sayar.
+        <strong> Engel bildirilen</strong> ise durumu farklı olsa da
+        engel metni dolu olan raporları sayar. Gecikme bildirimi de
+        aynı şekilde yalnızca gecikme nedenine bakar.
       </Alert>
 
-      <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
+      {reportsQuery.isLoading ? (
+        <LoadingState rows={6} />
+      ) : reportsQuery.isError ? (
         <Card>
-          <CardHeader
-            title="Hazırlanan Raporlar"
-            description="Çalışan iş güncellemesi akışı etkinleştirildiğinde aşağıdaki raporlar gerçek kayıtlarla oluşturulacak."
+          <ErrorState
+            message={getErrorMessage(reportsQuery.error)}
+            onRetry={() => void reportsQuery.refetch()}
           />
-          <ul className="divide-y divide-worktrack-line">
-            {plannedReports.map((report) => (
-              <li
-                key={report}
-                className="flex items-start gap-3 px-5 py-3.5"
-              >
-                <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
-                  <BarChart3
-                    className="h-4 w-4"
-                    aria-hidden="true"
-                  />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-worktrack-ink">
-                    {report}
-                  </p>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    Henüz kullanılamıyor · sonraki aşama
-                  </p>
-                </div>
-                <Badge tone="neutral">Beklemede</Badge>
-              </li>
-            ))}
-          </ul>
-          <div className="flex items-start gap-2 border-t border-worktrack-line bg-slate-50/60 px-5 py-3">
-            <Clock3
-              className="mt-0.5 h-4 w-4 shrink-0 text-slate-400"
-              aria-hidden="true"
+        </Card>
+      ) : data && data.items.length === 0 ? (
+        <Card>
+          {hasFilters ? (
+            <EmptyState
+              icon={ClipboardList}
+              title="Eşleşen rapor bulunamadı"
+              description="Seçili tarih aralığı, proje, çalışan, görev veya durum için kayıtlı bir rapor yok. Filtreleri değiştirerek tekrar deneyin."
+              action={
+                <Button variant="secondary" onClick={clearFilters}>
+                  Filtreleri temizle
+                </Button>
+              }
             />
-            <p className="text-xs leading-5 text-slate-500">
-              Raporların ön koşulu, çalışanların Telegram üzerinden
-              ilettiği iş güncellemelerinin onaylanmış kayıtlara
-              dönüşmesidir. Bu akış şu anda bu panelin kapsamı dışında
-              tutulmaktadır.
-            </p>
-          </div>
+          ) : (
+            <EmptyState
+              icon={ClipboardList}
+              title="Henüz iş raporu yok"
+              description="Çalışanlar iş güncellemesi gönderdiğinde kayıtlar burada listelenecek. Bu ekranda örnek veya sahte rapor gösterilmez."
+            />
+          )}
         </Card>
+      ) : data ? (
+        <>
+          <div className="table-shell">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Rapor tarihi</th>
+                  <th scope="col">Çalışan</th>
+                  <th scope="col">Proje</th>
+                  <th scope="col">Görev</th>
+                  <th scope="col">Durum</th>
+                  <th scope="col">Genel ilerleme</th>
+                  <th scope="col">Engel / Gecikme</th>
+                  <th scope="col">Çalışan onayı</th>
+                  <th scope="col" className="text-right">
+                    Detay
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.items.map((report) => {
+                  const statusMeta = workStatusMeta[report.status]
+                  const reviewMeta =
+                    reportReviewStatusMeta[report.review_status]
 
-        <Card>
-          <CardHeader
-            title="Mevcut Gerçek Veriler"
-            description="Raporlar hazır olana kadar güncel kayıtları ilgili sayfalardan inceleyebilirsiniz."
-          />
-          <ul className="divide-y divide-worktrack-line">
-            {dataSources.map((source) => (
-              <li key={source.to}>
-                <Link
-                  to={source.to}
-                  className="flex items-center gap-3 px-5 py-3.5 transition hover:bg-slate-50/70"
-                >
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-worktrack-navy/5 text-worktrack-navy">
-                    <source.icon
-                      className="h-4 w-4"
-                      aria-hidden="true"
-                    />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-worktrack-ink">
-                      {source.label}
-                    </span>
-                    <span className="block text-xs text-slate-500">
-                      {source.description}
-                    </span>
-                  </span>
-                  <ArrowRight
-                    className="h-4 w-4 text-slate-300"
-                    aria-hidden="true"
-                  />
-                </Link>
-              </li>
-            ))}
-          </ul>
-          <div className="border-t border-worktrack-line bg-slate-50/60 px-5 py-3">
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1 text-xs font-semibold text-worktrack-blue hover:underline"
-            >
-              <ClipboardList className="h-3.5 w-3.5" aria-hidden="true" />
-              Genel Bakış'ta güncel sayıları görün
-            </Link>
+                  return (
+                    <tr
+                      key={report.id}
+                      className="cursor-pointer"
+                      onClick={() =>
+                        setSelectedReportId(report.id)
+                      }
+                    >
+                      <td className="text-xs whitespace-nowrap text-slate-500">
+                        {formatDateTime(report.received_at)}
+                      </td>
+                      <td>
+                        <span className="font-medium text-worktrack-ink">
+                          {report.employee_name ?? '—'}
+                        </span>
+                      </td>
+                      <td>
+                        {report.project_name ? (
+                          <span className="text-slate-600">
+                            {report.project_name}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td>
+                        {report.task_title ? (
+                          <span className="text-slate-700">
+                            {report.task_title}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <Badge tone={statusMeta.tone}>
+                          {statusMeta.label}
+                        </Badge>
+                      </td>
+                      <td>
+                        <div className="flex min-w-24 flex-col gap-1.5">
+                          <Badge
+                            tone={completionTone(
+                              report.completion_percentage,
+                            )}
+                          >
+                            {report.completion_percentage === null
+                              ? 'Belirtilmedi'
+                              : `%${report.completion_percentage}`}
+                          </Badge>
+                          {report.completion_percentage !== null ? (
+                            <div
+                              className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100"
+                              role="img"
+                              aria-label={`Genel ilerleme: ${report.completion_percentage}`}
+                            >
+                              <div
+                                className="h-full rounded-full bg-worktrack-blue"
+                                style={{
+                                  width: `${Math.min(
+                                    Math.max(
+                                      report.completion_percentage,
+                                      0,
+                                    ),
+                                    100,
+                                  )}%`,
+                                }}
+                              />
+                            </div>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="flex flex-wrap gap-1">
+                          {report.has_blocker ? (
+                            <Badge tone="danger">Engel</Badge>
+                          ) : null}
+                          {report.has_delay ? (
+                            <Badge tone="warning">Gecikme</Badge>
+                          ) : null}
+                          {!report.has_blocker &&
+                          !report.has_delay ? (
+                            <span className="text-slate-400">—</span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td>
+                        <Badge tone={reviewMeta.tone}>
+                          {reviewMeta.label}
+                        </Badge>
+                      </td>
+                      <td>
+                        <div className="flex justify-end">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              setSelectedReportId(report.id)
+                            }
+                            aria-label={`Raporu görüntüle: ${
+                              report.task_title ?? report.id
+                            }`}
+                            leftIcon={
+                              <Eye
+                                className="h-4 w-4"
+                                aria-hidden="true"
+                              />
+                            }
+                          >
+                            Görüntüle
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
-        </Card>
+
+          <Pagination
+            page={data.page}
+            pages={data.pages}
+            total={data.total}
+            onPageChange={setPage}
+          />
+        </>
+      ) : null}
+
+      <div className="flex items-start gap-2 rounded-xl border border-worktrack-line bg-white px-4 py-3">
+        <Lock
+          className="mt-0.5 h-4 w-4 shrink-0 text-slate-400"
+          aria-hidden="true"
+        />
+        <p className="text-xs leading-5 text-slate-500">
+          Bu ekran salt okunurdur. Raporlar silinemez, düzenlenemez;
+          çalışan onayı, haftalık planlar veya görev ilerlemesi buradan
+          değiştirilemez. Çalışan onayı, çalışanın AI analizini
+          onayladığını gösterir; yönetici onayı değildir.
+        </p>
       </div>
+
+      <ReportDetailModal
+        reportId={selectedReportId}
+        onClose={() => setSelectedReportId(null)}
+      />
     </div>
   )
 }

@@ -165,3 +165,69 @@ export interface WeeklyPlanPayload {
   target_description: string
   target_completion_percentage: number | null
 }
+
+export type WorkStatus =
+  | 'completed'
+  | 'in_progress'
+  | 'blocked'
+  | 'not_started'
+  | 'unknown'
+
+export type ReportReviewStatus = 'pending' | 'approved' | 'rejected'
+
+export interface ReportListItem {
+  id: number
+  received_at: string
+  employee_id: number | null
+  employee_name: string | null
+  project_id: number | null
+  project_name: string | null
+  task_id: number | null
+  task_title: string | null
+  completion_percentage: number | null
+  status: WorkStatus
+  has_blocker: boolean
+  has_delay: boolean
+  review_status: ReportReviewStatus
+  weekly_plan_id: number | null
+  has_weekly_plan: boolean
+}
+
+export interface ReportStats {
+  total: number
+  blocked_count: number
+  with_blocker_count: number
+  with_delay_count: number
+  completed_count: number
+}
+
+export interface ReportListResponse extends Page<ReportListItem> {
+  stats: ReportStats
+}
+
+export interface ReportWeeklyPlan {
+  id: number
+  target_description: string
+  target_completion_percentage: number | null
+  week_start_date: string
+  week_end_date: string
+  status: WeeklyPlanStatus
+}
+
+export interface ReportDetail extends ReportListItem {
+  task_description: string | null
+  original_message: string
+  task_reference_text: string | null
+  blocker: string | null
+  delay_reason: string | null
+  next_step: string | null
+  reported_eta_text: string | null
+  reported_eta_date: string | null
+  reported_eta_weekday: string | null
+  summary: string | null
+  ai_model: string | null
+  reviewed_at: string | null
+  reviewed_by_employee_id: number | null
+  reviewed_by_employee_name: string | null
+  weekly_plan: ReportWeeklyPlan | null
+}

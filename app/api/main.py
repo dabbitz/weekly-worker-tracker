@@ -13,6 +13,7 @@ from app.api.routes import (
     health,
     projects,
     registration_requests,
+    reports,
     tasks,
     weekly_plans,
 )
@@ -90,6 +91,7 @@ app.include_router(employees.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(weekly_plans.router, prefix="/api")
 app.include_router(registration_requests.router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)

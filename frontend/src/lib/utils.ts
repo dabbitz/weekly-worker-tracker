@@ -1,4 +1,5 @@
 import { ApiError } from '../api/client'
+import type { ReportReviewStatus, WorkStatus } from '../types'
 
 export function cn(
   ...values: Array<string | false | null | undefined>
@@ -154,6 +155,52 @@ export const registrationStatusMeta = {
   rejected: {
     label: 'Reddedildi',
     tone: 'danger' as const,
+  },
+}
+
+type BadgeTone = 'neutral' | 'success' | 'warning' | 'danger' | 'info'
+
+export const workStatusMeta: Record<
+  WorkStatus,
+  { label: string; tone: BadgeTone }
+> = {
+  completed: {
+    label: 'Tamamlandı',
+    tone: 'success',
+  },
+  in_progress: {
+    label: 'Devam ediyor',
+    tone: 'info',
+  },
+  blocked: {
+    label: 'Engellendi',
+    tone: 'danger',
+  },
+  not_started: {
+    label: 'Başlanmadı',
+    tone: 'warning',
+  },
+  unknown: {
+    label: 'Belirsiz',
+    tone: 'neutral',
+  },
+}
+
+export const reportReviewStatusMeta: Record<
+  ReportReviewStatus,
+  { label: string; tone: BadgeTone }
+> = {
+  pending: {
+    label: 'Çalışan onayı bekliyor',
+    tone: 'warning',
+  },
+  approved: {
+    label: 'Çalışan onayladı',
+    tone: 'success',
+  },
+  rejected: {
+    label: 'Çalışan reddetti',
+    tone: 'danger',
   },
 }
 

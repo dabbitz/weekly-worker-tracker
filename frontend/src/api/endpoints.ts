@@ -18,6 +18,8 @@ import type {
   ProjectPayload,
   RegistrationRequest,
   RegistrationStatus,
+  ReportDetail,
+  ReportListResponse,
   Task,
   TaskCreatePayload,
   TaskPayload,
@@ -25,6 +27,7 @@ import type {
   WeeklyPlanPayload,
   WeeklyPlanSource,
   WeeklyPlanStatus,
+  WorkStatus,
 } from '../types'
 
 interface ListParams {
@@ -218,5 +221,30 @@ export const registrationRequestsApi = {
     return request<Page<RegistrationRequest>>(
       `/registration-requests${buildQuery(params)}`,
     )
+  },
+}
+
+export interface ReportListParams {
+  page?: number
+  page_size?: number
+  date_from?: string
+  date_to?: string
+  project_id?: number
+  employee_id?: number
+  task_id?: number
+  status?: WorkStatus
+  has_blocker?: boolean
+  has_delay?: boolean
+}
+
+export const reportsApi = {
+  list(params: ReportListParams = {}): Promise<ReportListResponse> {
+    return request<ReportListResponse>(
+      `/reports${buildQuery(params)}`,
+    )
+  },
+
+  get(id: number): Promise<ReportDetail> {
+    return request<ReportDetail>(`/reports/${id}`)
   },
 }
