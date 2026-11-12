@@ -3,7 +3,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query'
-import { CalendarRange, Target } from 'lucide-react'
+import { CalendarRange, Sparkles, Target } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 
@@ -252,7 +252,7 @@ export function WeeklyPlanFormDialog({
       description={
         plan
           ? 'Haftalık hedefi ve tamamlanma yüzdesini güncelleyin.'
-          : 'Bir görev için haftalık hedef tanımlayın. Görevin genel planlanan tarihleri ayrı tutulur.'
+          : 'Bir görev için taslak haftalık hedef tanımlayın. Plan, onaylandığında resmî hedef olur.'
       }
       size="lg"
       footer={
@@ -279,6 +279,38 @@ export function WeeklyPlanFormDialog({
         <Alert tone="error" className="mb-4">
           {serverError}
         </Alert>
+      ) : null}
+
+      {plan?.source === 'ai' &&
+      (plan.ai_rationale || plan.ai_assumptions || plan.ai_warnings) ? (
+        <div className="mb-4 space-y-2">
+          <p className="flex items-center gap-1.5 text-sm font-semibold text-worktrack-ink">
+            <Sparkles
+              className="h-4 w-4 text-worktrack-blue"
+              aria-hidden="true"
+            />
+            AI plan notları
+          </p>
+          {plan.ai_rationale ? (
+            <Alert tone="info" title="Gerekçe">
+              <p className="whitespace-pre-line">{plan.ai_rationale}</p>
+            </Alert>
+          ) : null}
+          {plan.ai_assumptions ? (
+            <Alert tone="warning" title="Varsayımlar">
+              <p className="whitespace-pre-line">
+                {plan.ai_assumptions}
+              </p>
+            </Alert>
+          ) : null}
+          {plan.ai_warnings ? (
+            <Alert tone="error" title="Uyarılar">
+              <p className="whitespace-pre-line">
+                {plan.ai_warnings}
+              </p>
+            </Alert>
+          ) : null}
+        </div>
       ) : null}
 
       {!tasksQuery.isLoading && tasks.length === 0 ? (
@@ -422,9 +454,11 @@ export function WeeklyPlanFormDialog({
             className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400"
             aria-hidden="true"
           />
-          Aynı görev için aynı hafta başlangıcına sahip ikinci bir plan
-          oluşturulamaz. Haftalık plan hedefleri, görevin planlanan
-          başlangıç ve bitiş tarihlerinden bağımsızdır.
+          Manuel plan taslak olarak oluşturulur; onayladığınızda resmî
+          haftalık hedef olur. Aynı görev ve hafta için tek manuel aktif
+          plan bulunabilir. AI taslakları birden fazla sürüm olarak
+          saklanabilir. Haftalık plan hedefleri, görevin planlanan
+          başlangıç ve bitiş tarihlerinden ayrı tutulur.
         </p>
       </form>
     </Modal>

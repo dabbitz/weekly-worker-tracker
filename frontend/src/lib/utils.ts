@@ -112,6 +112,36 @@ export function addDaysIso(isoDate: string, days: number): string {
   return date.toISOString().slice(0, 10)
 }
 
+export const weeklyPlanStatusMeta = {
+  draft: {
+    label: 'Taslak',
+    tone: 'warning' as const,
+  },
+  approved: {
+    label: 'Onaylandı',
+    tone: 'success' as const,
+  },
+  rejected: {
+    label: 'Reddedildi',
+    tone: 'danger' as const,
+  },
+  superseded: {
+    label: 'Eski Plan',
+    tone: 'neutral' as const,
+  },
+}
+
+export const weeklyPlanSourceMeta = {
+  ai: {
+    label: 'AI',
+    tone: 'info' as const,
+  },
+  manual: {
+    label: 'Manuel',
+    tone: 'neutral' as const,
+  },
+}
+
 export const registrationStatusMeta = {
   pending: {
     label: 'Bekliyor',

@@ -18,3 +18,7 @@ class ConflictError(ServiceError):
 
 class ValidationError(ServiceError):
     status_code = 422
+
+
+class ServiceUnavailableError(ServiceError):
+    status_code = 503

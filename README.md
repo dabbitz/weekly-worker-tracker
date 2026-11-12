@@ -32,6 +32,8 @@ A Telegram bot that turns free-form work updates from office and construction si
 - **Integration ready** — updates carry a `sync_status` for future external system sync.
 - **Async everywhere** — `aiogram`, SQLAlchemy async engine, and `asyncpg`.
 - **Admin dashboard** — Turkish-first React interface backed by a FastAPI API and the same PostgreSQL database.
+- **AI weekly planning** — select several tasks, add extra instructions, and let Gemini draft multi-week targets as reviewable drafts.
+- **Draft-first approvals** — AI plans are never official until an administrator approves them; edits, rejection, and regeneration keep a full history.
 - **Real data only** — no seeded demo records or fabricated metrics.
 - **Derived project teams** — employees are associated with projects through task assignments, not a separate membership table.
 
@@ -85,6 +87,8 @@ weekly-work-tracker/
 │   │   └── models.py            # ORM models
 │   ├── schemas/                 # Pydantic request/response models
 │   └── services/                # Business logic shared by the API and the bot
+├── alembic/
+│   └── versions/                # Reversible schema migrations
 ├── frontend/
 │   ├── src/
 │   │   ├── api/                 # REST client and endpoint functions
@@ -98,11 +102,12 @@ weekly-work-tracker/
 ├── tests/                       # Automated backend tests
 ├── scripts/
 │   └── hash_admin_password.py   # Argon2 password hash helper
-├── init_db.py                   # Creates database tables
+├── alembic.ini                  # Alembic configuration
+├── init_db.py                   # Legacy table bootstrap (prefer Alembic)
 ├── main.py                      # Telegram bot entry point
 ├── requirements.txt
 ├── .env                         # Local secrets (not committed)
-└── .env.example
+└── .env.example                 # Placeholders only
 ```
 
 ---
@@ -179,11 +184,17 @@ ACCESS_TOKEN_EXPIRE_MINUTES=480
 > `ADMIN_TELEGRAM_ID` separate from `ADMIN_USERNAME`; they authenticate
 > different channels. `AUTH_SECRET` must be at least 32 characters.
 
-### 5. Initialize the database
+### 5. Initialize / migrate the database
 
 ```bash
-python init_db.py
+# Apply all schema migrations
+.\.venv\Scripts\python.exe -m alembic upgrade head
 ```
+
+`init_db.py` still exists for a fresh bootstrap, but it uses
+`Base.metadata.create_all()` and therefore cannot alter existing tables.
+Use Alembic for every schema change; migrations are reviewed and
+reversible.
 
 ### 6. Run the bot
 
@@ -235,8 +246,8 @@ to the same Neon database through the FastAPI backend.
 | Proje Detayı | Project metadata, tasks, and employees derived from task assignments |
 | Çalışanlar | Search employees and open employee detail |
 | Çalışan Detayı | Assigned tasks and projects derived through those assignments |
-| Görevler | Create/edit tasks and assign multiple employees |
-| Haftalık Planlar | Define weekly targets and target completion percentages per task |
+| Görevler | Create/edit tasks, assign multiple employees, and start AI weekly planning for selected tasks |
+| Haftalık Planlar | Review AI drafts or create manual plans; edit, approve, reject, regenerate, and inspect history |
 | Kayıt Talepleri | Read-only Telegram registration history; decisions stay in Telegram |
 | Raporlar | Clearly marked later-phase report plan with no fabricated metrics |
 
@@ -251,6 +262,27 @@ Key behavior:
 - Dashboard authentication uses an Argon2 password hash and a signed,
   expiring JWT. Every admin endpoint except login and health requires a
   bearer token.
+
+### AI weekly planning
+
+- The administrator selects one or more tasks on **Görevler**, optionally
+  adds extra instructions, and requests a draft.
+- Gemini returns a strictly validated multi-week plan; every suggestion is
+  stored as a `draft` with `source = ai` and is never official on its own.
+- Planning weeks start on Monday, last seven days, and are clipped to the
+  task's planned start/due dates.
+- `target_completion_percentage` is the **cumulative** completion expected
+  at the end of that week, not the weekly increment.
+- A draft can be edited, approved, rejected, deleted, or regenerated.
+  Manual plans use `source = manual`.
+- Several drafts may coexist for the same task/week, but a partial unique
+  index allows only **one approved plan per task/week**. Approving a
+  conflicting draft requires an explicit replacement confirmation, and the
+  previous approved plan becomes `superseded` instead of being deleted.
+- Approved plans (and plans referenced by `task_updates`) are never
+  physically removed; history is preserved.
+- Generation requests are idempotent per `request_id` plus a content
+  fingerprint, so retrying a failed request does not create duplicates.
 
 ---
 
@@ -303,6 +335,7 @@ erDiagram
     TASKS ||--o{ TASK_ASSIGNMENTS : assigned_to
     PROJECTS ||--o{ TASKS : contains
     TASKS ||--o{ WEEKLY_TASK_PLANS : planned_in
+    WEEKLY_PLAN_GENERATIONS ||--o{ WEEKLY_TASK_PLANS : produces
     TASKS ||--o{ TASK_UPDATES : receives
     WEEKLY_TASK_PLANS ||--o{ TASK_UPDATES : contextualizes
     EMPLOYEES ||--o{ TASK_UPDATES : submits
@@ -314,8 +347,21 @@ erDiagram
 | `projects` | Projects with location and expected completion date |
 | `tasks` | Work items belonging to a project, with planned dates |
 | `task_assignments` | Many-to-many link between tasks and employees |
-| `weekly_task_plans` | Weekly targets per task, including target completion % |
+| `weekly_task_plans` | Weekly targets per task with lifecycle status, source, and AI notes |
+| `weekly_plan_generations` | One AI generation request, grouping the drafts it produced |
 | `task_updates` | AI-extracted updates, review status, and sync state |
+
+### Weekly plan lifecycle
+
+| Status | Meaning |
+| --- | --- |
+| `draft` | Editable suggestion, not yet official |
+| `approved` | The single active plan for that task/week |
+| `rejected` | Reviewed and declined; kept for history |
+| `superseded` | Replaced by a newer approved plan; kept for history |
+
+Plans also record their `source` (`manual` or `ai`), the optional AI note,
+and the administrator/timestamp of the approval.
 
 ### Work status values
 
@@ -344,6 +390,11 @@ erDiagram
 The suite runs against isolated, randomly named PostgreSQL schemas on
 the configured Neon database and removes them afterwards. It does not
 modify rows in the `public` schema.
+
+Covered areas include dashboard authentication, project/employee/task
+CRUD, task assignments, weekly plans, and the AI weekly planning workflow
+(structured output validation, date and percentage rules, idempotency,
+approval/replacement, history protection, and unauthenticated access).
 
 ### Manual smoke tests
 
@@ -390,7 +441,8 @@ npm run lint
 - [ ] Weekly summary and reporting endpoints
 - [ ] Manager review flow (approve / reject updates)
 - [ ] External system synchronization
-- [ ] Alembic migrations instead of `create_all`
+- [x] Alembic migrations instead of `create_all`
+- [x] AI-assisted multi-week plan drafts with admin approval
 - [x] Automated backend test suite and Turkish admin dashboard
 
 ---

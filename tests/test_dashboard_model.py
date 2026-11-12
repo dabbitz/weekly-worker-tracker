@@ -68,6 +68,7 @@ def test_no_project_memberships_table_or_direct_link():
         "tasks",
         "task_assignments",
         "weekly_task_plans",
+        "weekly_plan_generations",
         "task_updates",
         "registration_requests",
     }

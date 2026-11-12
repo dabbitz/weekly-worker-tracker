@@ -4,13 +4,18 @@ import {
   ListChecks,
   Pencil,
   Plus,
+  Sparkles,
 } from 'lucide-react'
 import {
   useDeferredValue,
   useEffect,
   useState,
 } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import {
+  Link,
+  useNavigate,
+  useSearchParams,
+} from 'react-router-dom'
 
 import {
   employeesApi,
@@ -18,6 +23,7 @@ import {
   tasksApi,
 } from '../api/endpoints'
 import { TaskFormDialog } from '../components/tasks/TaskFormDialog'
+import { AIGeneratePlansDialog } from '../components/weekly-plans/AIGeneratePlansDialog'
 import { AvatarGroup } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -44,6 +50,9 @@ export function TasksPage() {
   const [page, setPage] = useState(1)
   const [formOpen, setFormOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<Task | null>(null)
+  const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([])
+  const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const navigate = useNavigate()
   const { showToast } = useToast()
 
   const projectsQuery = useQuery({
@@ -120,6 +129,10 @@ export function TasksPage() {
     }
   }, [taskParam, showToast])
 
+  useEffect(() => {
+    setSelectedTaskIds([])
+  }, [page, projectId, employeeId, deferredSearch])
+
   const handleProjectChange = (value: string) => {
     setProjectId(value)
     setPage(1)
@@ -163,6 +176,34 @@ export function TasksPage() {
 
   const projects = projectsQuery.data ?? []
   const employees = employeesQuery.data?.items ?? []
+  const visibleTasks = data?.items ?? []
+  const allVisibleSelected =
+    visibleTasks.length > 0 &&
+    visibleTasks.every((task) => selectedTaskIds.includes(task.id))
+
+  const toggleTaskSelection = (taskId: number) => {
+    setSelectedTaskIds((current) =>
+      current.includes(taskId)
+        ? current.filter((id) => id !== taskId)
+        : [...current, taskId],
+    )
+  }
+
+  const toggleAllVisible = () => {
+    setSelectedTaskIds((current) => {
+      if (allVisibleSelected) {
+        return current.filter(
+          (id) => !visibleTasks.some((task) => task.id === id),
+        )
+      }
+
+      const merged = new Set(current)
+      for (const task of visibleTasks) {
+        merged.add(task.id)
+      }
+      return [...merged]
+    })
+  }
 
   return (
     <div className="space-y-5">
@@ -170,12 +211,30 @@ export function TasksPage() {
         title="Görevler"
         description="Projelere bağlı görevleri oluşturun, planlanan tarihleri belirleyin ve birden fazla çalışan atayın."
         actions={
-          <Button
-            onClick={openCreate}
-            leftIcon={<Plus className="h-4 w-4" />}
-          >
-            Yeni görev
-          </Button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="soft"
+              onClick={() => setAiDialogOpen(true)}
+              disabled={selectedTaskIds.length === 0}
+              leftIcon={<Sparkles className="h-4 w-4" />}
+              title={
+                selectedTaskIds.length === 0
+                  ? 'Önce tablodan bir veya birden fazla görev seçin.'
+                  : undefined
+              }
+            >
+              AI ile haftalık plan oluştur
+              {selectedTaskIds.length > 0
+                ? ` (${selectedTaskIds.length})`
+                : ''}
+            </Button>
+            <Button
+              onClick={openCreate}
+              leftIcon={<Plus className="h-4 w-4" />}
+            >
+              Yeni görev
+            </Button>
+          </div>
         }
       />
 
@@ -328,6 +387,15 @@ export function TasksPage() {
             <table className="data-table">
               <thead>
                 <tr>
+                  <th scope="col" className="w-10">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleAllVisible}
+                      className="h-4 w-4 rounded border-slate-300 text-worktrack-blue focus:ring-worktrack-blue/30"
+                      aria-label="Sayfadaki tüm görevleri seç"
+                    />
+                  </th>
                   <th scope="col">Görev</th>
                   <th scope="col">Planlanan Başlangıç</th>
                   <th scope="col">Planlanan Bitiş</th>
@@ -340,7 +408,23 @@ export function TasksPage() {
               </thead>
               <tbody>
                 {data.items.map((task) => (
-                  <tr key={task.id}>
+                  <tr
+                    key={task.id}
+                    className={
+                      selectedTaskIds.includes(task.id)
+                        ? 'bg-worktrack-blue/5'
+                        : undefined
+                    }
+                  >
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedTaskIds.includes(task.id)}
+                        onChange={() => toggleTaskSelection(task.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-worktrack-blue focus:ring-worktrack-blue/30"
+                        aria-label={`${task.title} görevini seç`}
+                      />
+                    </td>
                     <td>
                       <div className="min-w-0">
                         <p className="font-medium text-worktrack-ink">
@@ -437,6 +521,20 @@ export function TasksPage() {
           projectId ? Number(projectId) : undefined
         }
       />
+
+      {aiDialogOpen ? (
+        <AIGeneratePlansDialog
+          open
+          taskIds={selectedTaskIds}
+          onClose={() => setAiDialogOpen(false)}
+          onGenerated={(response) => {
+            setSelectedTaskIds([])
+            navigate(
+              `/haftalik-planlar?uretim=${response.generation_id}`,
+            )
+          }}
+        />
+      ) : null}
     </div>
   )
 }

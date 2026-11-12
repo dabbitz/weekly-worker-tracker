@@ -72,6 +72,14 @@ export interface ProjectDetail extends Project {
   employees: EmployeeSummary[]
 }
 
+export type WeeklyPlanStatus =
+  | 'draft'
+  | 'approved'
+  | 'rejected'
+  | 'superseded'
+
+export type WeeklyPlanSource = 'manual' | 'ai'
+
 export interface WeeklyPlan {
   id: number
   task_id: number
@@ -82,8 +90,30 @@ export interface WeeklyPlan {
   week_end_date: string
   target_description: string
   target_completion_percentage: number | null
+  status: WeeklyPlanStatus
+  source: WeeklyPlanSource
+  generation_id: number | null
+  generation_request_id: string | null
+  ai_rationale: string | null
+  ai_assumptions: string | null
+  ai_warnings: string | null
+  approved_at: string | null
   created_at: string
   updated_at: string
+}
+
+export interface AIPlanGeneratePayload {
+  task_ids: number[]
+  extra_instructions: string | null
+  request_id: string
+}
+
+export interface AIPlanGenerateResponse {
+  generation_id: number
+  request_id: string
+  plan_count: number
+  tasks: number[]
+  plans: WeeklyPlan[]
 }
 
 export type RegistrationStatus = 'pending' | 'approved' | 'rejected'

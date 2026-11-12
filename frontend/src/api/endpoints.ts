@@ -5,6 +5,8 @@ import {
 } from './client'
 import type {
   Admin,
+  AIPlanGeneratePayload,
+  AIPlanGenerateResponse,
   DashboardSummary,
   Employee,
   EmployeeDetail,
@@ -21,6 +23,8 @@ import type {
   TaskPayload,
   WeeklyPlan,
   WeeklyPlanPayload,
+  WeeklyPlanSource,
+  WeeklyPlanStatus,
 } from '../types'
 
 interface ListParams {
@@ -141,11 +145,18 @@ export const weeklyPlansApi = {
       project_id?: number
       task_id?: number
       week_start_date?: string
+      status?: WeeklyPlanStatus
+      source?: WeeklyPlanSource
+      generation_id?: number
     } = {},
   ): Promise<Page<WeeklyPlan>> {
     return request<Page<WeeklyPlan>>(
       `/weekly-plans${buildQuery(params)}`,
     )
+  },
+
+  get(id: number): Promise<WeeklyPlan> {
+    return request<WeeklyPlan>(`/weekly-plans/${id}`)
   },
 
   create(payload: WeeklyPlanPayload): Promise<WeeklyPlan> {
@@ -163,6 +174,40 @@ export const weeklyPlansApi = {
       method: 'PATCH',
       body: payload,
     })
+  },
+
+  approve(
+    id: number,
+    replaceExisting = false,
+  ): Promise<WeeklyPlan> {
+    return request<WeeklyPlan>(`/weekly-plans/${id}/approve`, {
+      method: 'POST',
+      body: { replace_existing: replaceExisting },
+    })
+  },
+
+  reject(id: number): Promise<WeeklyPlan> {
+    return request<WeeklyPlan>(`/weekly-plans/${id}/reject`, {
+      method: 'POST',
+    })
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/weekly-plans/${id}`, {
+      method: 'DELETE',
+    })
+  },
+
+  generateAi(
+    payload: AIPlanGeneratePayload,
+  ): Promise<AIPlanGenerateResponse> {
+    return request<AIPlanGenerateResponse>(
+      '/weekly-plans/ai/generate',
+      {
+        method: 'POST',
+        body: payload,
+      },
+    )
   },
 }
 
