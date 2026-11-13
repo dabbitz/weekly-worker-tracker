@@ -1,0 +1,1129 @@
+"""Telegram handlers for employee text reporting.
+
+The flow is deliberately narrow:
+
+* only active employees in private chats,
+* the task is always re-resolved from the database,
+* the AI result is only a draft held in FSM data,
+* a row is inserted only after an explicit confirmation,
+* the source report message id, not the callback message id, is stored.
+
+Handlers are kept thin. Draft validation, formatting and snapshot
+comparison live in separate modules so they can be tested without
+Telegram or Gemini.
+"""
+
+import logging
+import secrets
+from datetime import date, datetime
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from pydantic import ValidationError as PydanticValidationError
+
+from app.bot import formatting
+from app.bot.drafts import (
+    EDITABLE_FIELDS,
+    apply_edit,
+    clamp_ai_draft,
+    draft_from_data,
+)
+from app.bot.selection import (
+    context_matches_selection,
+    plan_to_data,
+    selection_data,
+)
+from app.bot.states import ReportFlow
+from app.database.connection import SessionLocal
+from app.schemas.work_update import WorkUpdate
+from app.services.date_normalizer import normalize_eta_date
+from app.services.employee_work_service import (
+    create_task_update,
+    get_active_employee_by_telegram_id,
+    get_task_context,
+    list_my_tasks,
+)
+from app.services.exceptions import (
+    ConflictError,
+    NotFoundError,
+)
+from app.services.exceptions import ValidationError as ServiceValidationError
+from app.services.week_utils import istanbul_today
+
+logger = logging.getLogger("worktrack.bot")
+
+router = Router(name="employee_reports")
+
+_extractor = None
+
+
+def set_extractor(extractor) -> None:
+    """Register the shared AI extractor in the bot process."""
+
+    global _extractor
+    _extractor = extractor
+
+
+def get_extractor():
+    return _extractor
+
+
+def _today() -> date:
+    """Patchable clock wrapper; production uses Istanbul time."""
+
+    return istanbul_today()
+
+
+def _state_is(state: str | None, expected) -> bool:
+    return state == expected.state
+
+
+def _matches_flow(data: dict, user_id: int, chat_id: int) -> bool:
+    return (
+        data.get("telegram_user_id") == user_id
+        and data.get("chat_id") == chat_id
+    )
+
+
+def _callback_allowed(callback: CallbackQuery) -> bool:
+    if callback.from_user is None or callback.message is None:
+        return False
+    if callback.message.chat.type != "private":
+        return False
+    return True
+
+
+async def _reject_non_private(callback: CallbackQuery) -> None:
+    await callback.answer(
+        formatting.PRIVATE_ONLY,
+        show_alert=True,
+    )
+
+
+async def _edit_or_send(
+    callback: CallbackQuery,
+    data: dict,
+    text: str,
+    reply_markup=None,
+) -> None:
+    """Edit the stored preview message, or send a fresh one."""
+
+    message_id = data.get("preview_message_id")
+
+    if message_id is not None:
+        try:
+            await callback.bot.edit_message_text(
+                chat_id=data.get("chat_id"),
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            logger.warning("Could not edit the report preview message.")
+
+    if callback.message is not None:
+        await callback.message.answer(
+            text,
+            reply_markup=reply_markup,
+        )
+
+
+async def _clear_and_replace(
+    callback: CallbackQuery,
+    state: FSMContext,
+    data: dict,
+    text: str,
+) -> None:
+    await state.clear()
+    await _edit_or_send(callback, data, text, reply_markup=None)
+
+
+async def _render_preview(
+    message: Message,
+    state: FSMContext,
+    data: dict,
+) -> None:
+    text = formatting.format_preview_text(data)
+    markup = formatting.preview_keyboard(
+        data.get("confirmation_token") or ""
+    )
+    preview_id = data.get("preview_message_id")
+
+    if preview_id is not None:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=data.get("chat_id"),
+                message_id=preview_id,
+                text=text,
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            logger.warning("Could not refresh the report preview message.")
+
+    sent = await message.answer(text, reply_markup=markup)
+    await state.update_data(
+        preview_message_id=getattr(sent, "message_id", None)
+    )
+
+
+@router.message(Command("gorevlerim", "rapor"))
+async def gorevlerim_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if message.from_user is None:
+        return
+
+    if message.chat.type != "private":
+        await message.answer(formatting.PRIVATE_ONLY)
+        return
+
+    await state.clear()
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            message.from_user.id,
+        )
+
+        if employee is None:
+            await message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        tasks = await list_my_tasks(session, employee.id, today)
+
+    if not tasks:
+        await message.answer(
+            "Bu hafta için size atanmış bir görev bulunmuyor.\n\n"
+            "Görev ataması yapıldığında buradan rapor "
+            "gönderebilirsiniz."
+        )
+        return
+
+    await message.answer(
+        formatting.format_task_list_text(tasks, today),
+        reply_markup=formatting.task_list_keyboard(tasks),
+    )
+
+
+@router.callback_query(F.data.startswith("task:"))
+async def task_selection_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if callback.from_user is None or callback.message is None:
+        await callback.answer()
+        return
+
+    if callback.message.chat.type != "private":
+        await _reject_non_private(callback)
+        return
+
+    raw_task_id = (callback.data or "").split(":", 1)[-1]
+
+    try:
+        task_id = int(raw_task_id)
+    except ValueError:
+        await callback.answer(
+            "Geçersiz görev seçimi.",
+            show_alert=True,
+        )
+        return
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            callback.from_user.id,
+        )
+
+        if employee is None:
+            await state.clear()
+            await callback.answer(
+                "Aktif çalışan kaydı bulunamadı.",
+                show_alert=True,
+            )
+            await callback.message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        try:
+            context = await get_task_context(
+                session,
+                employee.id,
+                task_id,
+                today,
+            )
+        except NotFoundError:
+            await state.clear()
+            await callback.answer(
+                "Görev bulunamadı veya bu göreve atanmış değilsiniz.",
+                show_alert=True,
+            )
+            return
+
+    data = selection_data(
+        context,
+        telegram_user_id=callback.from_user.id,
+        chat_id=callback.message.chat.id,
+    )
+
+    await state.set_data(data)
+    await state.set_state(ReportFlow.waiting_for_report)
+
+    await callback.answer("Görev seçildi.")
+
+    prompt = formatting.format_selected_task_prompt(data)
+
+    try:
+        await callback.bot.edit_message_text(
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            text=prompt,
+            reply_markup=None,
+        )
+    except Exception:
+        logger.warning("Could not replace the task list message.")
+        await callback.message.answer(prompt)
+
+
+@router.message(F.text)
+async def report_text_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if message.from_user is None:
+        return
+
+    if message.chat.type != "private":
+        await message.answer(formatting.PRIVATE_ONLY)
+        return
+
+    current = await state.get_state()
+
+    if _state_is(current, ReportFlow.waiting_for_report):
+        await _handle_report_text(message, state)
+        return
+
+    if _state_is(current, ReportFlow.waiting_for_field_edit):
+        await _handle_field_edit_text(message, state)
+        return
+
+    if _state_is(current, ReportFlow.reviewing):
+        await message.answer(
+            "Rapor önizlemesi hazır. Lütfen yukarıdaki "
+            "'Onayla ve kaydet', 'Bilgileri düzenle' veya "
+            "'İptal et' butonlarını kullanın."
+        )
+        return
+
+    # No active draft. Never call the AI on random free text anymore;
+    # reports must be tied to a selected task.
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            message.from_user.id,
+        )
+
+    if employee is None:
+        await message.answer(formatting.REGISTER_GUIDANCE)
+        return
+
+    await message.answer(
+        "Rapor göndermek için önce /gorevlerim komutuyla "
+        "bir görev seçin."
+    )
+
+
+async def _handle_report_text(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+
+    if not data or data.get("task_id") is None:
+        await state.clear()
+        await message.answer(
+            "Rapor akışı bulunamadı. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    if not _matches_flow(
+        data,
+        message.from_user.id,
+        message.chat.id,
+    ):
+        await state.clear()
+        await message.answer(
+            "Bu rapor akışı size ait değil. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    text = message.text or ""
+
+    if not text.strip():
+        await message.answer(
+            "Lütfen boş olmayan bir rapor metni gönderin."
+        )
+        return
+
+    extractor = _extractor
+
+    if extractor is None:
+        await message.answer(
+            "Yapay zekâ servisi henüz hazır değil. "
+            "Lütfen daha sonra tekrar deneyin."
+        )
+        return
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            message.from_user.id,
+        )
+
+        if employee is None:
+            await state.clear()
+            await message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        try:
+            context = await get_task_context(
+                session,
+                employee.id,
+                data["task_id"],
+                today,
+            )
+        except NotFoundError:
+            await state.clear()
+            await message.answer(
+                "Görev atamanız bulunamadı veya kaldırıldı. "
+                + formatting.RESTART_HINT
+            )
+            return
+
+    # Refresh the plan snapshot so the preview reflects the current
+    # database state, including a newly appearing conflict.
+    data["task_title"] = context.title
+    data["project_name"] = context.project_name
+    data["plan"] = plan_to_data(context.weekly_plan)
+    data["plan_conflict"] = context.plan_conflict
+    await state.set_data(data)
+
+    await message.answer("Mesajınız analiz ediliyor...")
+
+    try:
+        result = await extractor.extract(text)
+
+        if isinstance(result, WorkUpdate):
+            draft = result
+        else:
+            draft = WorkUpdate.model_validate(result)
+
+        draft = clamp_ai_draft(draft)
+
+        if not draft.summary or not draft.summary.strip():
+            raise ValueError("AI returned an empty summary.")
+
+        eta_result = normalize_eta_date(
+            draft.reported_eta_text,
+            message.date,
+        )
+
+        token = secrets.token_hex(4)
+        ai_model = getattr(extractor, "model", None)
+
+        data.update(
+            {
+                "source_message_id": message.message_id,
+                "source_message_date": message.date.isoformat(),
+                "original_message": text,
+                "draft": draft.model_dump(mode="json"),
+                "reported_eta_date": (
+                    eta_result.normalized_date.isoformat()
+                    if eta_result.normalized_date is not None
+                    else None
+                ),
+                "ai_model": (
+                    str(ai_model)[:100]
+                    if ai_model is not None
+                    else None
+                ),
+                "confirmation_token": token,
+                "field_to_edit": None,
+                "preview_message_id": None,
+            }
+        )
+
+        # Render the preview before entering the reviewing state. If the
+        # Telegram send fails, the employee stays in the report state and
+        # can retry instead of being stuck with no preview buttons.
+        sent = await message.answer(
+            formatting.format_preview_text(data),
+            reply_markup=formatting.preview_keyboard(token),
+        )
+
+        data["preview_message_id"] = getattr(
+            sent,
+            "message_id",
+            None,
+        )
+
+        await state.set_data(data)
+        await state.set_state(ReportFlow.reviewing)
+
+    except Exception:
+        # Never log or persist the employee's message content here.
+        logger.exception("Report analysis failed.")
+        await message.answer(
+            "Raporunuz analiz edilemedi. Hiçbir kayıt "
+            "oluşturulmadı.\n\nLütfen rapor metnini yeniden "
+            "gönderin."
+        )
+
+
+async def _handle_field_edit_text(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        message.from_user.id,
+        message.chat.id,
+    ):
+        await state.clear()
+        await message.answer(
+            "Düzenleme oturumu bulunamadı. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    field = data.get("field_to_edit")
+
+    if not field or field not in EDITABLE_FIELDS:
+        await message.answer(
+            "Lütfen düzenlemek istediğiniz alanı "
+            "butonlardan seçin."
+        )
+        return
+
+    spec = EDITABLE_FIELDS[field]
+
+    if spec.kind == "status":
+        await message.answer(
+            "Durum için lütfen yukarıdaki butonlardan "
+            "birini seçin."
+        )
+        return
+
+    if (
+        data.get("draft") is None
+        or data.get("source_message_date") is None
+    ):
+        await state.clear()
+        await message.answer(
+            "Taslak bilgisi bulunamadı. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    reference_datetime = datetime.fromisoformat(
+        data["source_message_date"]
+    )
+
+    current_eta_date = (
+        date.fromisoformat(data["reported_eta_date"])
+        if data.get("reported_eta_date")
+        else None
+    )
+
+    outcome = apply_edit(
+        draft_data=data["draft"],
+        field=field,
+        raw_value=message.text,
+        reference_datetime=reference_datetime,
+        current_eta_date=current_eta_date,
+    )
+
+    if outcome.error is not None:
+        await message.answer(outcome.error)
+        return
+
+    data["draft"] = outcome.draft
+    data["reported_eta_date"] = (
+        outcome.eta_date.isoformat()
+        if outcome.eta_date is not None
+        else None
+    )
+    data["field_to_edit"] = None
+    # A changed draft must not be confirmable through a button that was
+    # rendered for the previous version.
+    data["confirmation_token"] = secrets.token_hex(4)
+
+    await state.set_data(data)
+    await state.set_state(ReportFlow.reviewing)
+
+    await message.answer("Bilgi güncellendi. Güncel önizleme:")
+    await _render_preview(message, state, data)
+
+
+@router.callback_query(F.data == "rep:edit")
+async def edit_menu_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "Düzenleme oturumu bulunamadı. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.reviewing,
+    ):
+        await callback.answer(
+            "Düzenlenecek bir rapor önizlemesi yok.",
+            show_alert=True,
+        )
+        return
+
+    data["field_to_edit"] = None
+    await state.set_data(data)
+    await state.set_state(ReportFlow.waiting_for_field_edit)
+
+    await callback.message.answer(
+        "Hangi bilgiyi düzenlemek istiyorsunuz?",
+        reply_markup=formatting.edit_menu_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:field:"))
+async def edit_field_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "Düzenleme oturumu bulunamadı. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.waiting_for_field_edit,
+    ):
+        await callback.answer(
+            "Bu düzenleme bağlantısı artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    field = (callback.data or "").split(":", 2)[-1]
+    spec = EDITABLE_FIELDS.get(field)
+
+    if spec is None:
+        await callback.answer(
+            "Bu alan düzenlenemiyor.",
+            show_alert=True,
+        )
+        return
+
+    data["field_to_edit"] = field
+    await state.set_data(data)
+
+    if spec.kind == "status":
+        await callback.message.answer(
+            formatting.format_field_prompt(spec),
+            reply_markup=formatting.status_keyboard(),
+        )
+    else:
+        await callback.message.answer(
+            formatting.format_field_prompt(spec)
+        )
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:status:"))
+async def edit_status_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "Düzenleme oturumu bulunamadı. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    if (
+        not _state_is(
+            await state.get_state(),
+            ReportFlow.waiting_for_field_edit,
+        )
+        or data.get("field_to_edit") != "status"
+    ):
+        await callback.answer(
+            "Bu durum seçimi artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    if (
+        data.get("draft") is None
+        or data.get("source_message_date") is None
+    ):
+        await state.clear()
+        await callback.answer(
+            "Taslak bilgisi bulunamadı. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    reference_datetime = datetime.fromisoformat(
+        data["source_message_date"]
+    )
+
+    current_eta_date = (
+        date.fromisoformat(data["reported_eta_date"])
+        if data.get("reported_eta_date")
+        else None
+    )
+
+    status_value = (callback.data or "").split(":", 2)[-1]
+
+    outcome = apply_edit(
+        draft_data=data["draft"],
+        field="status",
+        raw_value=status_value,
+        reference_datetime=reference_datetime,
+        current_eta_date=current_eta_date,
+    )
+
+    if outcome.error is not None:
+        await callback.answer(
+            outcome.error,
+            show_alert=True,
+        )
+        return
+
+    data["draft"] = outcome.draft
+    data["reported_eta_date"] = (
+        outcome.eta_date.isoformat()
+        if outcome.eta_date is not None
+        else None
+    )
+    data["field_to_edit"] = None
+    # Invalidate any button rendered for the previous draft version.
+    data["confirmation_token"] = secrets.token_hex(4)
+
+    await state.set_data(data)
+    await state.set_state(ReportFlow.reviewing)
+
+    await callback.answer("Durum güncellendi.")
+
+    await _render_preview(callback.message, state, data)
+
+
+@router.callback_query(F.data == "rep:back")
+async def back_to_preview_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "Düzenleme oturumu bulunamadı. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.waiting_for_field_edit,
+    ):
+        await callback.answer(
+            "Bu işlem artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    data["field_to_edit"] = None
+    await state.set_data(data)
+    await state.set_state(ReportFlow.reviewing)
+
+    await callback.answer()
+    await _render_preview(callback.message, state, data)
+
+
+@router.callback_query(F.data == "rep:cancel")
+async def cancel_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "İptal edilecek bir rapor taslağı bulunamadı.",
+            show_alert=True,
+        )
+        return
+
+    await _clear_and_replace(
+        callback,
+        state,
+        data,
+        "Rapor iptal edildi. Hiçbir kayıt oluşturulmadı.\n\n"
+        + formatting.RESTART_HINT,
+    )
+
+    await callback.answer("Rapor iptal edildi.")
+
+
+@router.callback_query(F.data.startswith("rep:confirm:"))
+async def confirm_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await state.clear()
+        await callback.answer(
+            "Onay oturumu bulunamadı veya size ait değil. "
+            + formatting.RESTART_HINT,
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.reviewing,
+    ):
+        await callback.answer(
+            "Bu onay artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    token = (callback.data or "").split(":", 2)[-1]
+    expected_token = data.get("confirmation_token") or ""
+
+    if (
+        not expected_token
+        or not token
+        or not secrets.compare_digest(token, expected_token)
+    ):
+        await callback.answer(
+            "Onay bağlantısı geçersiz veya eski. "
+            "Lütfen güncel önizlemeyi kullanın.",
+            show_alert=True,
+        )
+        return
+
+    if (
+        data.get("task_id") is None
+        or data.get("draft") is None
+        or data.get("source_message_id") is None
+        or data.get("source_message_date") is None
+        or data.get("original_message") is None
+    ):
+        await _clear_and_replace(
+            callback,
+            state,
+            data,
+            "Rapor taslağı bulunamadı. "
+            + formatting.RESTART_HINT,
+        )
+        await callback.answer(
+            "Taslak bilgisi eksik.",
+            show_alert=True,
+        )
+        return
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            callback.from_user.id,
+        )
+
+        if employee is None:
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Aktif çalışan kaydınız bulunamadı; rapor "
+                "kaydedilmedi.\n\n"
+                + formatting.REGISTER_GUIDANCE,
+            )
+            await callback.answer(
+                "Aktif çalışan kaydı bulunamadı.",
+                show_alert=True,
+            )
+            return
+
+        try:
+            context = await get_task_context(
+                session,
+                employee.id,
+                data["task_id"],
+                today,
+            )
+        except NotFoundError:
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Görev atamanız artık bulunmuyor; rapor "
+                "kaydedilmedi.\n\n"
+                + formatting.RESTART_HINT,
+            )
+            await callback.answer(
+                "Görev ataması bulunamadı.",
+                show_alert=True,
+            )
+            return
+
+        if not context_matches_selection(data, context):
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Haftalık plan bilgisi önizleme "
+                "oluşturulduktan sonra değişti. Eski "
+                "önizleme kaydedilmedi.\n\n"
+                + formatting.RESTART_HINT,
+            )
+            await callback.answer(
+                "Haftalık plan değişti; akışı yeniden başlatın.",
+                show_alert=True,
+            )
+            return
+
+        source_datetime = datetime.fromisoformat(
+            data["source_message_date"]
+        )
+
+        try:
+            draft = draft_from_data(data["draft"])
+
+            eta_result = normalize_eta_date(
+                draft.reported_eta_text,
+                source_datetime,
+            )
+
+            await create_task_update(
+                session,
+                telegram_user_id=callback.from_user.id,
+                telegram_chat_id=data["chat_id"],
+                telegram_message_id=data["source_message_id"],
+                task_id=context.task_id,
+                original_message=data["original_message"],
+                draft=draft,
+                weekly_plan_id=(
+                    context.weekly_plan.id
+                    if context.weekly_plan is not None
+                    else None
+                ),
+                reported_eta_date=eta_result.normalized_date,
+                ai_model=data.get("ai_model"),
+                today=today,
+            )
+
+            await session.commit()
+
+        except ConflictError:
+            await session.rollback()
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Bu rapor daha önce kaydedilmiş olabilir. "
+                "İkinci bir kayıt oluşturulmadı.\n\n"
+                + formatting.RESTART_HINT,
+            )
+            await callback.answer(
+                "Rapor daha önce kaydedilmiş.",
+                show_alert=True,
+            )
+            return
+
+        except (NotFoundError, ServiceValidationError) as exc:
+            await session.rollback()
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Rapor kaydedilemedi: "
+                + str(exc)
+                + "\n\n"
+                + formatting.RESTART_HINT,
+            )
+            await callback.answer(
+                "Rapor kaydedilemedi.",
+                show_alert=True,
+            )
+            return
+
+        except PydanticValidationError:
+            await session.rollback()
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Rapor bilgileri geçersiz; kayıt "
+                "oluşturulmadı.\n\n"
+                + formatting.RESTART_HINT,
+            )
+            await callback.answer(
+                "Geçersiz rapor taslağı.",
+                show_alert=True,
+            )
+            return
+
+        except Exception:
+            await session.rollback()
+            logger.exception("Could not persist the confirmed report.")
+            await _clear_and_replace(
+                callback,
+                state,
+                data,
+                "Rapor kaydedilirken bir hata oluştu. "
+                "Lütfen tekrar deneyin.",
+            )
+            await callback.answer(
+                "Kayıt sırasında hata oluştu.",
+                show_alert=True,
+            )
+            return
+
+    success_text = (
+        "Raporunuz kaydedildi.\n\n"
+        f"Görev: {data.get('task_title') or 'Belirtilmedi'}\n"
+        "Durum: Yönetici raporlarında görüntülenebilir.\n\n"
+        "Yeni bir rapor için /gorevlerim komutunu "
+        "kullanabilirsiniz."
+    )
+
+    await _clear_and_replace(
+        callback,
+        state,
+        data,
+        success_text,
+    )
+    await callback.answer("Rapor kaydedildi.")
+
+
+@router.message()
+async def unsupported_message_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if (
+        getattr(message, "voice", None) is not None
+        or getattr(message, "audio", None) is not None
+        or getattr(message, "video_note", None) is not None
+    ):
+        await message.answer(
+            "Sesli raporlama henüz etkin değil; şimdilik "
+            "metin mesajı gönderebilirsiniz."
+        )
+        return
+
+    if message.chat.type != "private":
+        return
+
+    await message.answer(
+        "Şimdilik yalnızca metin mesajlarını destekliyorum. "
+        "Rapor göndermek için /gorevlerim komutunu kullanın."
+    )
+
+
+def register_report_handlers(dispatcher) -> None:
+    """Include the employee report router after existing handlers."""
+
+    dispatcher.include_router(router)

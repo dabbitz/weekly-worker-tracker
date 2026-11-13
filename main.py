@@ -5,17 +5,15 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.filters.command import CommandObject
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from dotenv import load_dotenv
 
-from app.services.ai_service import WorkUpdateExtractor
-from app.services.date_normalizer import (
-    normalize_eta_date,
-    EtaResolutionStatus,
+from app.bot.handlers import (
+    register_report_handlers,
+    set_extractor,
 )
-from app.schemas.work_update import WorkStatus
-
-from aiogram.filters.command import CommandObject
+from app.services.ai_service import WorkUpdateExtractor
 
 from aiogram.types import (
     CallbackQuery,
@@ -53,18 +51,7 @@ if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing.")
 
 
-dp = Dispatcher()
-
-extractor: WorkUpdateExtractor | None = None
-
-
-STATUS_LABELS = {
-    WorkStatus.COMPLETED: "Tamamlandı",
-    WorkStatus.IN_PROGRESS: "Devam ediyor",
-    WorkStatus.BLOCKED: "Engellendi",
-    WorkStatus.NOT_STARTED: "Henüz başlanmadı",
-    WorkStatus.UNKNOWN: "Belirsiz",
-}
+dp = Dispatcher(storage=MemoryStorage())
 
 
 @dp.message(CommandStart())
@@ -72,10 +59,10 @@ async def start_handler(message: Message):
 
     await message.answer(
         "Merhaba!\n\n"
-        "Haftalık İş Takip Sistemi demo botuna hoş geldin.\n\n"
-        "İş güncellemelerini doğal dilde gönderebilirsin. "
-        "Yapay zekâ mesajlarını analiz ederek yapılandırılmış "
-        "iş güncellemelerine dönüştürecek."
+        "WorkTrack Haftalık İş Takip Sistemine hoş geldin.\n\n"
+        "Görevlerini görmek ve çalışma raporu göndermek için "
+        "/gorevlerim komutunu kullanabilirsin. "
+        "Kayıt için /register İsim Soyisim komutunu kullan."
     )
 
 
@@ -83,9 +70,12 @@ async def start_handler(message: Message):
 async def help_handler(message: Message):
 
     await message.answer(
-        "İş güncellemelerini doğal dilde gönderebilirsin.\n\n"
+        "Çalışma raporlarını seçtiğin görevle ilişkilendirerek "
+        "gönderebilirsin.\n\n"
         "/start - Botu başlat\n"
-        "/help - Yardım mesajını göster"
+        "/help - Yardım mesajını göster\n"
+        "/gorevlerim - Görevlerini listele ve rapor gönder\n"
+        "/rapor - /gorevlerim ile aynı işlev\n"
         "/register İsim Soyisim - Kayıt talebi oluştur\n"
     )
 
@@ -396,126 +386,14 @@ async def registration_decision_handler(
         )
 
 
-@dp.message(F.text)
-async def text_handler(message: Message):
+# Employee text reporting handlers are registered after the existing
+# registration handlers so commands and callbacks keep priority over the
+# general F.text handler.
 
-    if extractor is None:
-        await message.answer(
-            "Yapay zekâ servisi henüz hazır değil."
-        )
-        return
-
-    await message.answer(
-        "Mesajını inceliyorum..."
-    )
-
-    try:
-        # 1. Extract structured information using Gemini
-
-        result = await extractor.extract(message.text)
-
-        # 2. Normalize the expected completion date
-        # using the original Telegram message timestamp.
-
-        eta_result = normalize_eta_date(
-            eta_text=result.reported_eta_text,
-            reference_datetime=message.date,
-        )
-
-        # 3. Build the response
-
-        lines = [
-            "İŞ GÜNCELLEMESİ ANALİZİ",
-            "",
-            f"İş: {result.task_reference_text or 'Belirtilmedi'}",
-            f"Durum: {STATUS_LABELS.get(result.status, 'Belirsiz')}",
-        ]
-
-        if result.completion_percentage is not None:
-            lines.append(
-                f"Gerçekleşme: %{result.completion_percentage}"
-            )
-
-        if result.blocker:
-            lines.append(f"Engel: {result.blocker}")
-
-        if result.delay_reason:
-            lines.append(
-                f"Gecikme nedeni: {result.delay_reason}"
-            )
-
-        if result.next_step:
-            lines.append(
-                f"Sonraki adım: {result.next_step}"
-            )
-
-        # 4. Display normalized ETA
-
-        lines.append("")
-
-        if eta_result.status == EtaResolutionStatus.RESOLVED:
-
-            normalized_date = eta_result.normalized_date
-
-            lines.append(
-                f"Çalışanın bitiş ifadesi: {result.reported_eta_text}"
-            )
-
-            lines.append(
-                "Normalize edilmiş tahmini bitiş: "
-                f"{normalized_date.strftime('%d.%m.%Y')}"
-            )
-
-        elif eta_result.status == EtaResolutionStatus.MISSING:
-
-            lines.append(
-                "Tahmini bitiş: Çalışan tarafından belirtilmedi."
-            )
-
-        else:
-
-            lines.append(
-                f"Çalışanın bitiş ifadesi: "
-                f"{result.reported_eta_text}"
-            )
-
-            lines.append(
-                "Tahmini bitiş tarihi netleştirilmeli."
-            )
-
-        # 5. Summary
-
-        lines.extend([
-            "",
-            "ÖZET",
-            result.summary,
-            "",
-            "Bu analiz henüz veritabanına kaydedilmedi."
-        ])
-
-        await message.answer("\n".join(lines))
-
-    except Exception:
-
-        logging.exception("Work update analysis failed.")
-
-        await message.answer(
-            "Mesajını analiz ederken bir hata oluştu. "
-            "Lütfen biraz sonra tekrar dene."
-        )
-
-
-@dp.message()
-async def unsupported_handler(message: Message):
-
-    await message.answer(
-        "Şimdilik yalnızca metin mesajlarını destekliyorum."
-    )
+register_report_handlers(dp)
 
 
 async def main():
-
-    global extractor
 
     logging.basicConfig(
         level=logging.INFO,
@@ -526,6 +404,8 @@ async def main():
         api_key=GEMINI_API_KEY,
         model=GEMINI_MODEL
     )
+
+    set_extractor(extractor)
 
     try:
 
