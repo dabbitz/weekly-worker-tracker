@@ -45,6 +45,8 @@ class FakeBot:
     def __init__(self):
         self.edits = []
         self.sent = []
+        self.keyboard_clears = []
+        self.answer_failures = 0
         self._next_id = 1000
 
     def next_message_id(self) -> int:
@@ -53,6 +55,10 @@ class FakeBot:
 
     async def edit_message_text(self, **kwargs):
         self.edits.append(kwargs)
+        return True
+
+    async def edit_message_reply_markup(self, **kwargs):
+        self.keyboard_clears.append(kwargs)
         return True
 
     async def send_message(self, **kwargs):
@@ -104,6 +110,10 @@ class FakeMessage:
         self.answers = []
 
     async def answer(self, text, reply_markup=None, **kwargs):
+        if self.bot.answer_failures > 0:
+            self.bot.answer_failures -= 1
+            raise RuntimeError("Telegram send failed")
+
         self.answers.append(
             {"text": text, "reply_markup": reply_markup}
         )
@@ -184,6 +194,35 @@ def make_draft(**overrides) -> WorkUpdate:
     }
     data.update(overrides)
     return WorkUpdate.model_validate(data)
+
+
+def preview_callbacks(markup) -> list[str]:
+    return [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+
+
+async def open_field_edit(bot, state, telegram_id: int, field: str) -> None:
+    await handlers.edit_menu_handler(
+        FakeCallback(
+            bot=bot,
+            data="rep:edit",
+            user_id=telegram_id,
+            chat_id=telegram_id,
+        ),
+        state,
+    )
+    await handlers.edit_field_handler(
+        FakeCallback(
+            bot=bot,
+            data=f"rep:field:{field}",
+            user_id=telegram_id,
+            chat_id=telegram_id,
+        ),
+        state,
+    )
 
 
 async def make_state(user_id: int, chat_id: int | None = None):
@@ -923,7 +962,7 @@ async def test_other_fields_edit_and_preview_refresh(session):
     data = await state.get_data()
     assert await state.get_state() == ReportFlow.reviewing.state
     assert data["draft"]["blocker"] == "Malzeme gecikti."
-    assert "Engel: Malzeme gecikti." in bot.edits[-1]["text"]
+    assert "Engel: Malzeme gecikti." in edit_message.answers[-1]["text"]
 
     choose_completion = FakeCallback(
         bot=bot,
@@ -952,7 +991,7 @@ async def test_other_fields_edit_and_preview_refresh(session):
 
     data = await state.get_data()
     assert data["draft"]["completion_percentage"] == 85
-    assert "%85" in bot.edits[-1]["text"]
+    assert "%85" in completion_message.answers[-1]["text"]
 
     choose_summary = FakeCallback(
         bot=bot,
@@ -981,7 +1020,7 @@ async def test_other_fields_edit_and_preview_refresh(session):
 
     data = await state.get_data()
     assert data["draft"]["summary"] == "Güncellenmiş özet."
-    assert "Güncellenmiş özet." in bot.edits[-1]["text"]
+    assert "Güncellenmiş özet." in summary_message.answers[-1]["text"]
     # Editing fields must not replace the original source message id.
     assert data["source_message_id"] == 500
 
@@ -1109,7 +1148,7 @@ async def test_optional_text_fields_can_be_cleared(session):
 
     data = await state.get_data()
     assert data["draft"]["blocker"] is None
-    assert "Engel:" not in bot.edits[-1]["text"]
+    assert "Engel:" not in clear_message.answers[-1]["text"]
 
 
 async def test_cancel_discards_draft(session):
@@ -1515,3 +1554,218 @@ async def test_approval_does_not_change_weekly_plan(session):
     )
 
     assert after == before
+
+
+async def test_eta_edit_sends_new_preview_using_source_timestamp(session):
+    telegram_id = 7025
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    await setup_flow(session, bot, state, telegram_id=telegram_id)
+    handlers.set_extractor(
+        FakeExtractor(
+            make_draft(reported_eta_text="16 Kasım Pazartesi")
+        )
+    )
+    report_message = await submit_report(
+        bot,
+        state,
+        telegram_id=telegram_id,
+        message_id=500,
+    )
+
+    data = await state.get_data()
+    first_preview_id = data["preview_message_id"]
+    first_token = data["confirmation_token"]
+    source_date = data["source_message_date"]
+
+    initial_preview = report_message.answers[-1]["text"]
+    assert "Çalışanın bitiş ifadesi: 16 Kasım Pazartesi" in initial_preview
+    assert "16.11.2026 (pazartesi)" in initial_preview
+
+    await open_field_edit(bot, state, telegram_id, "reported_eta_text")
+
+    # The edit message is sent almost two weeks later. The ETA must
+    # still be resolved from the original report timestamp
+    # (16.11.2026, Monday), so "cuma" means 20.11.2026.
+    edit_message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text="cuma gününe kadar",
+        date_value=datetime(2026, 11, 27, 9, 0, tzinfo=timezone.utc),
+    )
+    await handlers.report_text_handler(edit_message, state)
+
+    # Exactly one message: the refreshed preview, not a notification
+    # followed by an unchanged preview.
+    assert len(edit_message.answers) == 1
+
+    updated_preview = edit_message.answers[-1]["text"]
+    assert "Çalışanın bitiş ifadesi: cuma gününe kadar" in updated_preview
+    assert (
+        "Normalize edilmiş tahmini bitiş: 20.11.2026 (cuma)"
+        in updated_preview
+    )
+    assert "Bilgi güncellendi" not in updated_preview
+
+    data = await state.get_data()
+    assert data["reported_eta_date"] == "2026-11-20"
+    assert data["draft"]["reported_eta_text"] == "cuma gününe kadar"
+    assert data["source_message_id"] == 500
+    assert data["source_message_date"] == source_date
+    assert data["original_message"] == REPORT_TEXT
+    assert data["confirmation_token"] != first_token
+    assert data["preview_message_id"] != first_preview_id
+
+    # The previous preview's keyboard was removed and the new one
+    # carries the rotated confirmation token.
+    assert first_preview_id in [
+        call["message_id"] for call in bot.keyboard_clears
+    ]
+    assert (
+        f"rep:confirm:{data['confirmation_token']}"
+        in preview_callbacks(edit_message.answers[-1]["reply_markup"])
+    )
+
+    # Confirmation recomputes the ETA from the same source timestamp.
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    confirm.message.date = datetime(
+        2026,
+        11,
+        30,
+        9,
+        0,
+        tzinfo=timezone.utc,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.reported_eta_date == date(2026, 11, 20)
+    assert update_row.telegram_message_id == 500
+    assert update_row.original_message == REPORT_TEXT
+
+
+async def test_status_edit_sends_new_preview_and_rotates_token(session):
+    telegram_id = 7026
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    await setup_flow(session, bot, state, telegram_id=telegram_id)
+    handlers.set_extractor(FakeExtractor(make_draft()))
+    await submit_report(bot, state, telegram_id=telegram_id)
+
+    data = await state.get_data()
+    first_preview_id = data["preview_message_id"]
+    old_token = data["confirmation_token"]
+
+    await open_field_edit(bot, state, telegram_id, "status")
+
+    status_callback = FakeCallback(
+        bot=bot,
+        data="rep:status:completed",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.edit_status_handler(status_callback, state)
+
+    data = await state.get_data()
+    assert data["draft"]["status"] == "completed"
+    assert data["confirmation_token"] != old_token
+    assert data["preview_message_id"] != first_preview_id
+    assert first_preview_id in [
+        call["message_id"] for call in bot.keyboard_clears
+    ]
+
+    updated_preview = status_callback.message.answers[-1]["text"]
+    assert "Durum: Tamamlandı" in updated_preview
+    assert (
+        f"rep:confirm:{data['confirmation_token']}"
+        in preview_callbacks(
+            status_callback.message.answers[-1]["reply_markup"]
+        )
+    )
+    assert status_callback.answers[-1] == {
+        "text": "Durum güncellendi.",
+        "show_alert": False,
+    }
+
+    old_confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{old_token}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(old_confirm, state)
+
+    assert old_confirm.answers[-1]["show_alert"] is True
+    assert await count_updates(session) == 0
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    new_confirm = FakeCallback(
+        bot=bot,
+        data=(
+            "rep:confirm:"
+            + (await state.get_data())["confirmation_token"]
+        ),
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(new_confirm, state)
+
+    assert await count_updates(session) == 1
+    assert await state.get_state() is None
+
+
+async def test_preview_send_failure_is_reported_without_false_success(
+    session,
+):
+    telegram_id = 7027
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    await setup_flow(session, bot, state, telegram_id=telegram_id)
+    handlers.set_extractor(FakeExtractor(make_draft()))
+    await submit_report(bot, state, telegram_id=telegram_id)
+
+    data = await state.get_data()
+    previous_preview_id = data["preview_message_id"]
+    previous_token = data["confirmation_token"]
+
+    await open_field_edit(bot, state, telegram_id, "blocker")
+
+    bot.answer_failures = 1
+
+    edit_message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text="Malzeme gecikti.",
+    )
+    await handlers.report_text_handler(edit_message, state)
+
+    data = await state.get_data()
+
+    # The edit itself is kept, but no success is claimed and the old
+    # preview id is not silently treated as refreshed.
+    assert data["draft"]["blocker"] == "Malzeme gecikti."
+    assert data["confirmation_token"] != previous_token
+    assert data["preview_message_id"] == previous_preview_id
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    texts = [answer["text"] for answer in edit_message.answers]
+
+    assert len(texts) == 1
+    assert "gönderilemedi" in texts[0].lower()
+    assert "Bilgi güncellendi" not in texts[0]
+    assert all("kaydedildi" not in text.lower() for text in texts)
+    assert await count_updates(session) == 0

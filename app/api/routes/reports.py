@@ -1,6 +1,6 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, require_admin
@@ -54,3 +54,16 @@ async def report_detail(
     session: AsyncSession = Depends(get_db),
 ) -> ReportDetail:
     return await report_service.get_report(session, report_id)
+
+
+@router.delete(
+    "/{report_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_report(
+    report_id: int,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    await report_service.delete_report(session, report_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

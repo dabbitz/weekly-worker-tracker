@@ -1,4 +1,4 @@
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
@@ -6,17 +6,20 @@ from app.database.models import (
     Project,
     Task,
     TaskAssignment,
+    TaskUpdate,
+    WeeklyTaskPlan,
 )
 from app.schemas.common import Page
 from app.schemas.employee import EmployeeSummary
 from app.schemas.project import (
     ProjectCreate,
+    ProjectDeletionPreview,
     ProjectDetail,
     ProjectOption,
     ProjectRead,
     ProjectUpdate,
 )
-from app.services.exceptions import NotFoundError, ValidationError
+from app.services.exceptions import ConflictError, NotFoundError, ValidationError
 from app.services.task_service import list_project_tasks
 
 
@@ -285,3 +288,138 @@ async def list_project_options(
         ProjectOption(id=project.id, name=project.name)
         for project in result.scalars()
     ]
+
+
+def _project_task_ids(project_id: int):
+    return select(Task.id).where(Task.project_id == project_id)
+
+
+def _project_plan_ids(project_id: int):
+    return (
+        select(WeeklyTaskPlan.id)
+        .join(Task, Task.id == WeeklyTaskPlan.task_id)
+        .where(Task.project_id == project_id)
+    )
+
+
+async def _project_report_count(
+    session: AsyncSession,
+    project_id: int,
+) -> int:
+    """Count reports that would lose their project context on delete."""
+
+    return int(
+        (
+            await session.execute(
+                select(func.count(func.distinct(TaskUpdate.id))).where(
+                    or_(
+                        TaskUpdate.task_id.in_(
+                            _project_task_ids(project_id)
+                        ),
+                        TaskUpdate.weekly_plan_id.in_(
+                            _project_plan_ids(project_id)
+                        ),
+                    )
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def get_project_deletion_preview(
+    session: AsyncSession,
+    project_id: int,
+) -> ProjectDeletionPreview:
+    project = await session.get(Project, project_id)
+
+    if project is None:
+        raise NotFoundError("Proje bulunamadı.")
+
+    task_count = int(
+        (
+            await session.execute(
+                select(func.count(Task.id)).where(
+                    Task.project_id == project_id
+                )
+            )
+        ).scalar_one()
+    )
+    assignment_count = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(TaskAssignment)
+                .join(Task, Task.id == TaskAssignment.task_id)
+                .where(Task.project_id == project_id)
+            )
+        ).scalar_one()
+    )
+    weekly_plan_count = int(
+        (
+            await session.execute(
+                select(func.count(WeeklyTaskPlan.id))
+                .select_from(WeeklyTaskPlan)
+                .join(Task, Task.id == WeeklyTaskPlan.task_id)
+                .where(Task.project_id == project_id)
+            )
+        ).scalar_one()
+    )
+
+    return ProjectDeletionPreview(
+        id=project.id,
+        name=project.name,
+        task_count=task_count,
+        assignment_count=assignment_count,
+        weekly_plan_count=weekly_plan_count,
+        report_count=await _project_report_count(session, project_id),
+    )
+
+
+async def delete_project(
+    session: AsyncSession,
+    project_id: int,
+) -> None:
+    """Delete a project and its planning data without touching history.
+
+    Reports are independent historical records. If any report references
+    one of the project's tasks or weekly plans, deletion is refused so the
+    administrator can decide explicitly what happens to that history.
+    """
+
+    project = await session.get(Project, project_id)
+
+    if project is None:
+        raise NotFoundError("Proje bulunamadı.")
+
+    report_count = await _project_report_count(session, project_id)
+
+    if report_count > 0:
+        raise ConflictError(
+            f"Bu projeye bağlı {report_count} iş raporu bulunuyor. "
+            "Rapor geçmişinin korunması için proje silinemez. "
+            "Lütfen önce ilgili raporları silin."
+        )
+
+    task_ids = _project_task_ids(project_id)
+
+    try:
+        await session.execute(
+            delete(TaskAssignment).where(
+                TaskAssignment.task_id.in_(task_ids)
+            )
+        )
+        await session.execute(
+            delete(WeeklyTaskPlan).where(
+                WeeklyTaskPlan.task_id.in_(task_ids)
+            )
+        )
+        await session.execute(
+            delete(Task).where(Task.project_id == project_id)
+        )
+        await session.execute(
+            delete(Project).where(Project.id == project_id)
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise

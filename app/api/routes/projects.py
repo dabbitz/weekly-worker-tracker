@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, require_admin
@@ -6,6 +6,7 @@ from app.schemas.common import Page
 from app.schemas.employee import EmployeeSummary
 from app.schemas.project import (
     ProjectCreate,
+    ProjectDeletionPreview,
     ProjectDetail,
     ProjectOption,
     ProjectRead,
@@ -87,6 +88,33 @@ async def project_employees(
         session,
         project_id,
     )
+
+
+@router.get(
+    "/{project_id}/deletion-preview",
+    response_model=ProjectDeletionPreview,
+)
+async def project_deletion_preview(
+    project_id: int,
+    session: AsyncSession = Depends(get_db),
+) -> ProjectDeletionPreview:
+    return await project_service.get_project_deletion_preview(
+        session,
+        project_id,
+    )
+
+
+@router.delete(
+    "/{project_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_project(
+    project_id: int,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    await project_service.delete_project(session, project_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{project_id}/tasks", response_model=list[TaskRead])

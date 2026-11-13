@@ -12,6 +12,8 @@ interface ConfirmDialogProps {
   cancelLabel?: string
   tone?: 'primary' | 'danger'
   isLoading?: boolean
+  confirmDisabled?: boolean
+  children?: ReactNode
   onConfirm: () => void
   onClose: () => void
 }
@@ -24,6 +26,8 @@ export function ConfirmDialog({
   cancelLabel = 'Vazgeç',
   tone = 'primary',
   isLoading = false,
+  confirmDisabled = false,
+  children,
   onConfirm,
   onClose,
 }: ConfirmDialogProps) {
@@ -46,14 +50,16 @@ export function ConfirmDialog({
             variant={tone === 'danger' ? 'danger' : 'primary'}
             onClick={onConfirm}
             isLoading={isLoading}
+            disabled={confirmDisabled}
           >
             {confirmLabel}
           </Button>
         </>
       }
     >
-      <div className="text-sm leading-6 text-slate-600">
+      <div className="space-y-3 text-sm leading-6 text-slate-600">
         {description}
+        {children}
       </div>
     </Modal>
   )

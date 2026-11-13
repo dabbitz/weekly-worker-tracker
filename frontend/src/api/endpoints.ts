@@ -13,6 +13,7 @@ import type {
   LoginResponse,
   Page,
   Project,
+  ProjectDeletionPreview,
   ProjectDetail,
   ProjectOption,
   ProjectPayload,
@@ -92,6 +93,18 @@ export const projectsApi = {
       body: payload,
     })
   },
+
+  deletionPreview(id: number): Promise<ProjectDeletionPreview> {
+    return request<ProjectDeletionPreview>(
+      `/projects/${id}/deletion-preview`,
+    )
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/projects/${id}`, {
+      method: 'DELETE',
+    })
+  },
 }
 
 export const employeesApi = {
@@ -103,6 +116,12 @@ export const employeesApi = {
 
   get(id: number): Promise<EmployeeDetail> {
     return request<EmployeeDetail>(`/employees/${id}`)
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/employees/${id}`, {
+      method: 'DELETE',
+    })
   },
 }
 
@@ -138,6 +157,12 @@ export const tasksApi = {
     return request<Task>(`/tasks/${id}/assignments`, {
       method: 'PUT',
       body: { employee_ids: employeeIds },
+    })
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/tasks/${id}`, {
+      method: 'DELETE',
     })
   },
 }
@@ -222,6 +247,12 @@ export const registrationRequestsApi = {
       `/registration-requests${buildQuery(params)}`,
     )
   },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/registration-requests/${id}`, {
+      method: 'DELETE',
+    })
+  },
 }
 
 export interface ReportListParams {
@@ -246,5 +277,11 @@ export const reportsApi = {
 
   get(id: number): Promise<ReportDetail> {
     return request<ReportDetail>(`/reports/${id}`)
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/reports/${id}`, {
+      method: 'DELETE',
+    })
   },
 }

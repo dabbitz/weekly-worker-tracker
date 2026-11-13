@@ -1,6 +1,6 @@
 from datetime import date
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,11 +9,13 @@ from app.database.models import (
     Project,
     Task,
     TaskAssignment,
+    TaskUpdate,
     WeeklyTaskPlan,
 )
 from app.schemas.common import Page
 from app.schemas.employee import EmployeeSummary
-from app.schemas.task import AssignmentUpdate, TaskCreate, TaskRead, TaskUpdate
+from app.schemas.task import AssignmentUpdate, TaskCreate, TaskRead
+from app.schemas.task import TaskUpdate as TaskUpdatePayload
 from app.services.exceptions import ConflictError, NotFoundError, ValidationError
 
 
@@ -317,7 +319,7 @@ async def create_task(
 async def update_task(
     session: AsyncSession,
     task_id: int,
-    payload: TaskUpdate,
+    payload: TaskUpdatePayload,
 ) -> TaskRead:
     task = await session.get(Task, task_id)
 
@@ -408,3 +410,72 @@ async def ensure_project_has_no_direct_employee_link() -> None:
         raise ConflictError(
             "Doğrudan çalışan-proje ilişkisi desteklenmiyor."
         )
+
+
+async def _task_report_count(
+    session: AsyncSession,
+    task_id: int,
+) -> int:
+    """Count reports referencing the task or one of its weekly plans."""
+
+    plan_ids = select(WeeklyTaskPlan.id).where(
+        WeeklyTaskPlan.task_id == task_id
+    )
+
+    return int(
+        (
+            await session.execute(
+                select(func.count(func.distinct(TaskUpdate.id))).where(
+                    or_(
+                        TaskUpdate.task_id == task_id,
+                        TaskUpdate.weekly_plan_id.in_(plan_ids),
+                    )
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def delete_task(
+    session: AsyncSession,
+    task_id: int,
+) -> None:
+    """Delete a task with its assignments and weekly plans atomically.
+
+    Any report that references the task or one of its plans blocks the
+    operation, because reports are independent historical records and must
+    be removed deliberately by the administrator first.
+    """
+
+    task = await session.get(Task, task_id)
+
+    if task is None:
+        raise NotFoundError("Görev bulunamadı.")
+
+    report_count = await _task_report_count(session, task_id)
+
+    if report_count > 0:
+        raise ConflictError(
+            f"Bu göreve bağlı {report_count} iş raporu bulunuyor. "
+            "Rapor geçmişinin korunması için görev silinemez. "
+            "Lütfen önce ilgili raporları silin."
+        )
+
+    try:
+        await session.execute(
+            delete(TaskAssignment).where(
+                TaskAssignment.task_id == task_id
+            )
+        )
+        await session.execute(
+            delete(WeeklyTaskPlan).where(
+                WeeklyTaskPlan.task_id == task_id
+            )
+        )
+        await session.execute(
+            delete(Task).where(Task.id == task_id)
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise

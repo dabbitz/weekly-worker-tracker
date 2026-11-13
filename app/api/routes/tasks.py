@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, require_admin
@@ -82,3 +82,16 @@ async def set_assignments(
         task_id,
         payload,
     )
+
+
+@router.delete(
+    "/{task_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_task(
+    task_id: int,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    await task_service.delete_task(session, task_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

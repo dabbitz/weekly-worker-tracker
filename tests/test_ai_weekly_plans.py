@@ -574,7 +574,7 @@ async def test_manual_plan_edit_approve_reject_and_delete(client):
     assert deleted.status_code == 204
 
 
-async def test_approved_plan_cannot_be_deleted(client):
+async def test_approved_plan_can_be_deleted(client):
     headers = await auth_headers(client)
     project_id = await create_project(client, headers)
     task_id = await create_task(
@@ -608,14 +608,13 @@ async def test_approved_plan_cannot_be_deleted(client):
         f"/api/weekly-plans/{plan_id}",
         headers=headers,
     )
-    assert deleted.status_code == 409
+    assert deleted.status_code == 204
 
     detail = await client.get(
         f"/api/weekly-plans/{plan_id}",
         headers=headers,
     )
-    assert detail.status_code == 200
-    assert detail.json()["status"] == "approved"
+    assert detail.status_code == 404
 
 
 async def test_only_one_approved_plan_per_task_week(

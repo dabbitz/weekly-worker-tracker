@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, require_admin
@@ -47,3 +47,19 @@ async def request_detail(
         session,
         request_id,
     )
+
+
+@router.delete(
+    "/{request_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_request(
+    request_id: int,
+    session: AsyncSession = Depends(get_db),
+) -> Response:
+    await registration_service.delete_registration_request(
+        session,
+        request_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

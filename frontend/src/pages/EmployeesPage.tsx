@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, Users } from 'lucide-react'
 import { useDeferredValue, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -8,13 +8,17 @@ import { Avatar } from '../components/ui/Avatar'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Pagination } from '../components/ui/Pagination'
 import { SearchInput } from '../components/ui/SearchInput'
+import { useToast } from '../components/ui/Toast'
 import { formatDate, getErrorMessage } from '../lib/utils'
+import type { Employee } from '../types'
 
 type ActiveFilter = 'all' | 'active' | 'inactive'
 
@@ -25,6 +29,10 @@ export function EmployeesPage() {
   const deferredSearch = useDeferredValue(search)
   const [filter, setFilter] = useState<ActiveFilter>('all')
   const [page, setPage] = useState(1)
+  const [deletingEmployee, setDeletingEmployee] =
+    useState<Employee | null>(null)
+  const queryClient = useQueryClient()
+  const { showToast } = useToast()
 
   const employeesQuery = useQuery({
     queryKey: ['employees', 'list', page, deferredSearch, filter],
@@ -36,6 +44,23 @@ export function EmployeesPage() {
         is_active:
           filter === 'all' ? undefined : filter === 'active',
       }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => employeesApi.remove(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['employees'] })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['projects'] })
+      void queryClient.invalidateQueries({ queryKey: ['weekly-plans'] })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      setDeletingEmployee(null)
+      showToast('Çalışan silindi.', 'success')
+    },
+    onError: (error) => {
+      setDeletingEmployee(null)
+      showToast(getErrorMessage(error), 'error')
+    },
   })
 
   const data = employeesQuery.data
@@ -144,7 +169,7 @@ export function EmployeesPage() {
                   <th scope="col">Proje</th>
                   <th scope="col">Kayıt Tarihi</th>
                   <th scope="col" className="text-right">
-                    Detay
+                    İşlem
                   </th>
                 </tr>
               </thead>
@@ -185,7 +210,7 @@ export function EmployeesPage() {
                       {formatDate(employee.created_at)}
                     </td>
                     <td>
-                      <div className="flex justify-end">
+                      <div className="flex items-center justify-end gap-1">
                         <Link
                           to={`/calisanlar/${employee.id}`}
                           className="rounded-md p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-worktrack-blue"
@@ -197,6 +222,15 @@ export function EmployeesPage() {
                             aria-hidden="true"
                           />
                         </Link>
+                        <DeleteButton
+                          label={`${employee.full_name} çalışanını sil`}
+                          onClick={() => setDeletingEmployee(employee)}
+                          disabled={deleteMutation.isPending}
+                          isDeleting={
+                            deleteMutation.isPending &&
+                            deleteMutation.variables === employee.id
+                          }
+                        />
                       </div>
                     </td>
                   </tr>
@@ -213,6 +247,39 @@ export function EmployeesPage() {
           />
         </>
       ) : null}
+
+      <ConfirmDialog
+        open={deletingEmployee !== null}
+        title="Çalışanı sil"
+        description={
+          <>
+            <p>
+              <strong className="text-worktrack-ink">
+                {deletingEmployee?.full_name}
+              </strong>{' '}
+              adlı çalışanı silmek istediğinizden emin misiniz?
+            </p>
+            <p>
+              Bu işlem geri alınamaz. Çalışanın görev atamaları kaldırılır.
+              Çalışana bağlı iş raporu varsa silme engellenir. Onaylı kayıt
+              talebi silinmez; çalışan kaydı korunur.
+            </p>
+          </>
+        }
+        confirmLabel="Çalışanı sil"
+        tone="danger"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deletingEmployee && !deleteMutation.isPending) {
+            deleteMutation.mutate(deletingEmployee.id)
+          }
+        }}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeletingEmployee(null)
+          }
+        }}
+      />
     </div>
   )
 }

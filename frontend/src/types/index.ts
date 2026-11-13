@@ -33,6 +33,15 @@ export interface ProjectOption {
   name: string
 }
 
+export interface ProjectDeletionPreview {
+  id: number
+  name: string
+  task_count: number
+  assignment_count: number
+  weekly_plan_count: number
+  report_count: number
+}
+
 export interface EmployeeSummary {
   id: number
   full_name: string

@@ -1,12 +1,18 @@
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import Employee, Project, Task, TaskAssignment
+from app.database.models import (
+    Employee,
+    Project,
+    Task,
+    TaskAssignment,
+    TaskUpdate,
+)
 from app.schemas.common import Page
 from app.schemas.employee import EmployeeRead
 from app.schemas.employee_detail import EmployeeDetail
 from app.schemas.project import ProjectOption
-from app.services.exceptions import NotFoundError
+from app.services.exceptions import ConflictError, NotFoundError
 from app.services.task_service import list_employee_tasks
 
 
@@ -176,3 +182,66 @@ async def list_active_employee_options(
         .order_by(Employee.full_name.asc())
     )
     return list(result.scalars())
+
+
+async def _employee_report_count(
+    session: AsyncSession,
+    employee_id: int,
+) -> int:
+    """Count reports where the employee is the author or the reviewer."""
+
+    return int(
+        (
+            await session.execute(
+                select(func.count(func.distinct(TaskUpdate.id))).where(
+                    or_(
+                        TaskUpdate.employee_id == employee_id,
+                        TaskUpdate.reviewed_by_employee_id == employee_id,
+                    )
+                )
+            )
+        ).scalar_one()
+    )
+
+
+async def delete_employee(
+    session: AsyncSession,
+    employee_id: int,
+) -> None:
+    """Delete an employee and their task assignments.
+
+    Reports are historical records and are never deleted implicitly. An
+    employee referenced by a report (as author or reviewer) cannot be
+    deleted until those reports are removed explicitly. Registration
+    requests are preserved by the existing ``ON DELETE SET NULL`` foreign
+    key, so deleting an employee never deletes a request or the employee
+    linked from it.
+    """
+
+    employee = await session.get(Employee, employee_id)
+
+    if employee is None:
+        raise NotFoundError("Çalışan bulunamadı.")
+
+    report_count = await _employee_report_count(session, employee_id)
+
+    if report_count > 0:
+        raise ConflictError(
+            f"Bu çalışana bağlı {report_count} iş raporu bulunuyor. "
+            "Rapor geçmişinin korunması için çalışan silinemez. "
+            "Lütfen önce ilgili raporları silin."
+        )
+
+    try:
+        await session.execute(
+            delete(TaskAssignment).where(
+                TaskAssignment.employee_id == employee_id
+            )
+        )
+        await session.execute(
+            delete(Employee).where(Employee.id == employee_id)
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise

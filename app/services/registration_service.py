@@ -186,3 +186,22 @@ async def get_registration_request(
 
     request, employee_full_name = row
     return _to_read(request, employee_full_name)
+
+
+async def delete_registration_request(
+    session: AsyncSession,
+    request_id: int,
+) -> None:
+    """Delete a registration request in any review state.
+
+    The request is the only record removed. In particular, deleting an
+    approved request never deletes the employee created by that approval.
+    """
+
+    request = await session.get(RegistrationRequest, request_id)
+
+    if request is None:
+        raise NotFoundError("Kayıt talebi bulunamadı.")
+
+    await session.delete(request)
+    await session.commit()

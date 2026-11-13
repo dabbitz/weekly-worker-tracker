@@ -1,8 +1,9 @@
-"""Read-only administrator queries for employee work reports.
+"""Administrator queries and explicit deletions for work reports.
 
-Reports are the persisted ``task_updates`` rows. This module never
-writes: it only lists and reads them with their related employee,
-task, project, reviewer and weekly plan data.
+Reports are the persisted ``task_updates`` rows. Listing and reading keep
+their related employee, task, project, reviewer and weekly plan data.
+Deleting a report removes only that report row: related tasks, plans,
+employees and projects are never modified.
 """
 
 from datetime import date, datetime, time, timedelta, timezone
@@ -344,3 +345,22 @@ async def get_report(
             else None
         ),
     )
+
+
+async def delete_report(
+    session: AsyncSession,
+    report_id: int,
+) -> None:
+    """Delete only the selected ``TaskUpdate`` row.
+
+    The task, weekly plan, employee and review relationships are left
+    untouched. Missing reports return the standard 404 service error.
+    """
+
+    report = await session.get(TaskUpdate, report_id)
+
+    if report is None:
+        raise NotFoundError("Rapor bulunamadı.")
+
+    await session.delete(report)
+    await session.commit()

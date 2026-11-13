@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   ArrowRight,
@@ -6,16 +6,20 @@ import {
   ListChecks,
   UserRound,
 } from 'lucide-react'
-import { Link, useParams } from 'react-router-dom'
+import { useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { employeesApi } from '../api/endpoints'
 import { Avatar } from '../components/ui/Avatar'
 import { Badge } from '../components/ui/Badge'
 import { Card, CardHeader } from '../components/ui/Card'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
+import { useToast } from '../components/ui/Toast'
 import {
   formatDate,
   formatDateTime,
@@ -25,11 +29,34 @@ import {
 export function EmployeeDetailPage() {
   const { employeeId } = useParams()
   const id = Number(employeeId)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const { showToast } = useToast()
 
   const employeeQuery = useQuery({
     queryKey: ['employees', 'detail', id],
     queryFn: () => employeesApi.get(id),
     enabled: Number.isFinite(id) && id > 0,
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (employeeIdToDelete: number) =>
+      employeesApi.remove(employeeIdToDelete),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['employees'] })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['projects'] })
+      void queryClient.invalidateQueries({ queryKey: ['weekly-plans'] })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      setDeleteOpen(false)
+      showToast('Çalışan silindi.', 'success')
+      navigate('/calisanlar')
+    },
+    onError: (error) => {
+      setDeleteOpen(false)
+      showToast(getErrorMessage(error), 'error')
+    },
   })
 
   if (!Number.isFinite(id) || id <= 0) {
@@ -85,9 +112,18 @@ export function EmployeeDetailPage() {
         title={employee.full_name}
         description="Görev atamaları ve bu atamalar üzerinden türetilen projeler."
         actions={
-          <Badge tone={employee.is_active ? 'success' : 'neutral'}>
-            {employee.is_active ? 'Aktif çalışan' : 'Pasif çalışan'}
-          </Badge>
+          <>
+            <Badge tone={employee.is_active ? 'success' : 'neutral'}>
+              {employee.is_active ? 'Aktif çalışan' : 'Pasif çalışan'}
+            </Badge>
+            <DeleteButton
+              label={`${employee.full_name} çalışanını sil`}
+              onClick={() => setDeleteOpen(true)}
+              disabled={deleteMutation.isPending}
+              isDeleting={deleteMutation.isPending}
+              className="border border-slate-300 bg-white p-2 hover:border-red-200"
+            />
+          </>
         }
       />
 
@@ -256,6 +292,38 @@ export function EmployeeDetailPage() {
           </div>
         </Card>
       </div>
+      <ConfirmDialog
+        open={deleteOpen}
+        title="Çalışanı sil"
+        description={
+          <>
+            <p>
+              <strong className="text-worktrack-ink">
+                {employee.full_name}
+              </strong>{' '}
+              adlı çalışanı silmek istediğinizden emin misiniz?
+            </p>
+            <p>
+              Bu işlem geri alınamaz. Çalışanın görev atamaları kaldırılır.
+              Çalışana bağlı iş raporu varsa silme engellenir. Onaylı kayıt
+              talebi silinmez; çalışan kaydı korunur.
+            </p>
+          </>
+        }
+        confirmLabel="Çalışanı sil"
+        tone="danger"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (!deleteMutation.isPending) {
+            deleteMutation.mutate(employee.id)
+          }
+        }}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeleteOpen(false)
+          }
+        }}
+      />
     </div>
   )
 }

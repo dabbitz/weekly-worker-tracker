@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BellRing,
   ClipboardCheck,
@@ -12,19 +12,25 @@ import { Alert } from '../components/ui/Alert'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Pagination } from '../components/ui/Pagination'
 import { SearchInput } from '../components/ui/SearchInput'
+import { useToast } from '../components/ui/Toast'
 import {
   formatDateTime,
   getErrorMessage,
   pluralize,
   registrationStatusMeta,
 } from '../lib/utils'
-import type { RegistrationStatus } from '../types'
+import type {
+  RegistrationRequest,
+  RegistrationStatus,
+} from '../types'
 
 const PAGE_SIZE = 15
 
@@ -43,6 +49,10 @@ export function RegistrationRequestsPage() {
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search)
   const [page, setPage] = useState(1)
+  const [deletingRequest, setDeletingRequest] =
+    useState<RegistrationRequest | null>(null)
+  const queryClient = useQueryClient()
+  const { showToast } = useToast()
 
   const requestsQuery = useQuery({
     queryKey: [
@@ -59,6 +69,22 @@ export function RegistrationRequestsPage() {
         status: status || undefined,
         search: deferredSearch.trim() || undefined,
       }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => registrationRequestsApi.remove(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ['registration-requests'],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      setDeletingRequest(null)
+      showToast('Kayıt talebi silindi.', 'success')
+    },
+    onError: (error) => {
+      setDeletingRequest(null)
+      showToast(getErrorMessage(error), 'error')
+    },
   })
 
   const data = requestsQuery.data
@@ -82,9 +108,9 @@ export function RegistrationRequestsPage() {
           Kayıt talepleri Telegram <code>/register</code> akışıyla
           oluşturulur. Onay ve reddetme işlemleri, bildirim mesajındaki
           düğmelerle yapılandırılmış Telegram yöneticisi tarafından
-          verilir. Bu panel kararları salt okunur olarak gösterir; buradan
-          yapılan bir işlem Telegram bildirimlerini veya kayıt geçmişini
-          değiştirmez.
+          verilir. Bu panel kararları gösterir; yönetici geçmiş talepleri
+          silebilir. Talep silmek, onaylanmış olsa bile çalışan kaydını
+          silmez.
         </p>
       </Alert>
 
@@ -183,6 +209,9 @@ export function RegistrationRequestsPage() {
                   <th scope="col">Durum</th>
                   <th scope="col">Bağlı Çalışan</th>
                   <th scope="col">Yönetici Kararı</th>
+                  <th scope="col" className="text-right">
+                    İşlem
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -261,6 +290,19 @@ export function RegistrationRequestsPage() {
                           </span>
                         )}
                       </td>
+                      <td>
+                        <div className="flex justify-end">
+                          <DeleteButton
+                            label={`${request.requested_full_name} kayıt talebini sil`}
+                            onClick={() => setDeletingRequest(request)}
+                            disabled={deleteMutation.isPending}
+                            isDeleting={
+                              deleteMutation.isPending &&
+                              deleteMutation.variables === request.id
+                            }
+                          />
+                        </div>
+                      </td>
                     </tr>
                   )
                 })}
@@ -276,6 +318,38 @@ export function RegistrationRequestsPage() {
           />
         </>
       ) : null}
+
+      <ConfirmDialog
+        open={deletingRequest !== null}
+        title="Kayıt talebini sil"
+        description={
+          <>
+            <p>
+              <strong className="text-worktrack-ink">
+                {deletingRequest?.requested_full_name}
+              </strong>{' '}
+              adına ait kayıt talebini silmek istediğinizden emin misiniz?
+            </p>
+            <p>
+              Bu işlem geri alınamaz. Yalnızca seçili kayıt talebi silinir;
+              onaylanmış talep silinse bile ilgili çalışan kaydı korunur.
+            </p>
+          </>
+        }
+        confirmLabel="Kayıt talebini sil"
+        tone="danger"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deletingRequest && !deleteMutation.isPending) {
+            deleteMutation.mutate(deletingRequest.id)
+          }
+        }}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeletingRequest(null)
+          }
+        }}
+      />
     </div>
   )
 }

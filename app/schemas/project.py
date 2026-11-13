@@ -45,3 +45,14 @@ class ProjectDetail(ProjectRead):
 class ProjectOption(BaseModel):
     id: int
     name: str
+
+
+class ProjectDeletionPreview(BaseModel):
+    """Counts shown to the administrator before a destructive delete."""
+
+    id: int
+    name: str
+    task_count: int
+    assignment_count: int
+    weekly_plan_count: int
+    report_count: int

@@ -10,9 +10,11 @@ import { useDeferredValue, useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { projectsApi } from '../api/endpoints'
+import { ProjectDeleteDialog } from '../components/projects/ProjectDeleteDialog'
 import { ProjectFormDialog } from '../components/projects/ProjectFormDialog'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
@@ -31,6 +33,8 @@ export function ProjectsPage() {
   const [page, setPage] = useState(1)
   const [formOpen, setFormOpen] = useState(false)
   const [editingProject, setEditingProject] =
+    useState<Project | null>(null)
+  const [deletingProject, setDeletingProject] =
     useState<Project | null>(null)
 
   const projectsQuery = useQuery({
@@ -229,6 +233,10 @@ export function ProjectsPage() {
                             aria-hidden="true"
                           />
                         </Link>
+                        <DeleteButton
+                          label={`${project.name} projesini sil`}
+                          onClick={() => setDeletingProject(project)}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -250,6 +258,13 @@ export function ProjectsPage() {
         open={formOpen}
         onClose={closeForm}
         project={editingProject}
+      />
+
+      <ProjectDeleteDialog
+        open={deletingProject !== null}
+        projectId={deletingProject?.id ?? null}
+        projectName={deletingProject?.name ?? ''}
+        onClose={() => setDeletingProject(null)}
       />
     </div>
   )

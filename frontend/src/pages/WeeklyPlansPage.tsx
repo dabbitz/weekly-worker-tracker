@@ -8,7 +8,6 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
-  Trash2,
   X,
 } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
@@ -23,6 +22,7 @@ import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
@@ -221,7 +221,7 @@ export function WeeklyPlansPage() {
     onSuccess: () => {
       invalidatePlanData()
       setConfirm(null)
-      showToast('Taslak silindi.', 'success')
+      showToast('Haftalık plan silindi.', 'success')
     },
     onError: (error) => {
       setConfirm(null)
@@ -738,66 +738,45 @@ export function WeeklyPlansPage() {
                             </>
                           ) : null}
 
-                          {plan.status === 'rejected' ? (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setConfirm({
-                                  title: 'Reddedilen planı sil',
-                                  description: (
+                          <DeleteButton
+                            label={`${plan.task_title} haftalık planını sil`}
+                            onClick={() =>
+                              setConfirm({
+                                title: 'Haftalık planı sil',
+                                description: (
+                                  <>
                                     <p>
-                                      Bu reddedilmiş plan kalıcı olarak
-                                      silinecek. İş güncellemesiyle
-                                      ilişkiliyse silme engellenir.
+                                      <strong className="text-worktrack-ink">
+                                        {plan.task_title}
+                                      </strong>{' '}
+                                      görevinin{' '}
+                                      {formatWeekRange(
+                                        plan.week_start_date,
+                                        plan.week_end_date,
+                                      )}{' '}
+                                      haftasındaki plan kalıcı olarak
+                                      silinecek.
                                     </p>
-                                  ),
-                                  confirmLabel: 'Planı sil',
-                                  tone: 'danger',
-                                  action: () =>
-                                    deleteMutation.mutate(plan.id),
-                                })
-                              }
-                              className="rounded-md p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                              aria-label={`${plan.task_title} reddedilen planını sil`}
-                              title="Sil"
-                            >
-                              <Trash2
-                                className="h-4 w-4"
-                                aria-hidden="true"
-                              />
-                            </button>
-                          ) : null}
-
-                          {plan.status === 'draft' ? (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setConfirm({
-                                  title: 'Taslağı sil',
-                                  description: (
                                     <p>
-                                      Bu taslak kalıcı olarak silinecek.
-                                      Onaylanmış planlar ve iş
-                                      güncellemesiyle ilişkili planlar
-                                      silinemez.
+                                      Bu işlem geri alınamaz. Plan bir iş
+                                      raporu tarafından kullanılıyorsa silme
+                                      engellenir; önce ilgili raporları
+                                      silmelisiniz.
                                     </p>
-                                  ),
-                                  confirmLabel: 'Taslağı sil',
-                                  tone: 'danger',
-                                  action: () =>
-                                    deleteMutation.mutate(plan.id),
-                                })
-                              }
-                              className="rounded-md p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                              aria-label={`${plan.task_title} taslağını sil`}
-                              title="Sil"
-                            >
-                              <Trash2
-                                className="h-4 w-4"
-                                aria-hidden="true"
-                              />
-                            </button>
-                          ) : null}
+                                  </>
+                                ),
+                                confirmLabel: 'Planı sil',
+                                tone: 'danger',
+                                action: () =>
+                                  deleteMutation.mutate(plan.id),
+                              })
+                            }
+                            disabled={deleteMutation.isPending}
+                            isDeleting={
+                              deleteMutation.isPending &&
+                              deleteMutation.variables === plan.id
+                            }
+                          />
 
                           {plan.source === 'ai' ? (
                             <button

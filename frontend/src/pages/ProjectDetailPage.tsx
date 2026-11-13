@@ -9,14 +9,16 @@ import {
   Users,
 } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { projectsApi } from '../api/endpoints'
+import { ProjectDeleteDialog } from '../components/projects/ProjectDeleteDialog'
 import { ProjectFormDialog } from '../components/projects/ProjectFormDialog'
 import { Avatar, AvatarGroup } from '../components/ui/Avatar'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card, CardHeader } from '../components/ui/Card'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
@@ -31,6 +33,8 @@ export function ProjectDetailPage() {
   const { projectId } = useParams()
   const id = Number(projectId)
   const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const navigate = useNavigate()
 
   const projectQuery = useQuery({
     queryKey: ['projects', 'detail', id],
@@ -93,13 +97,20 @@ export function ProjectDetailPage() {
           'Bu proje için henüz bir açıklama girilmedi.'
         }
         actions={
-          <Button
-            variant="secondary"
-            onClick={() => setEditOpen(true)}
-            leftIcon={<Pencil className="h-4 w-4" />}
-          >
-            Projeyi düzenle
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setEditOpen(true)}
+              leftIcon={<Pencil className="h-4 w-4" />}
+            >
+              Projeyi düzenle
+            </Button>
+            <DeleteButton
+              label={`${project.name} projesini sil`}
+              onClick={() => setDeleteOpen(true)}
+              className="border border-slate-300 bg-white p-2 hover:border-red-200"
+            />
+          </>
         }
       />
 
@@ -295,6 +306,14 @@ export function ProjectDetailPage() {
         open={editOpen}
         onClose={() => setEditOpen(false)}
         project={project}
+      />
+
+      <ProjectDeleteDialog
+        open={deleteOpen}
+        projectId={project.id}
+        projectName={project.name}
+        onClose={() => setDeleteOpen(false)}
+        onDeleted={() => navigate('/projeler')}
       />
     </div>
   )

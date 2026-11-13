@@ -141,33 +141,72 @@ async def _clear_and_replace(
     await _edit_or_send(callback, data, text, reply_markup=None)
 
 
-async def _render_preview(
+async def _remove_previous_keyboard(
+    message: Message,
+    data: dict,
+) -> None:
+    """Best-effort removal of the previous preview's buttons.
+
+    The confirmation token is rotated for every edit, so the old
+    buttons are already rejected. Clearing the markup also stops the
+    employee from tapping them again.
+    """
+
+    previous_id = data.get("preview_message_id")
+
+    if previous_id is None:
+        return
+
+    try:
+        await message.bot.edit_message_reply_markup(
+            chat_id=data.get("chat_id"),
+            message_id=previous_id,
+            reply_markup=None,
+        )
+    except Exception:
+        logger.warning(
+            "Could not remove the previous preview keyboard; the "
+            "rotated token still blocks stale confirmations."
+        )
+
+
+async def _send_fresh_preview(
     message: Message,
     state: FSMContext,
     data: dict,
-) -> None:
+) -> bool:
+    """Send the current draft as a brand new preview message.
+
+    Editing the old message in place leaves the refreshed report above
+    the employee's latest messages, so every successful edit is
+    delivered as a new message at the end of the chat. The previous
+    preview's keyboard is cleared and its token is already invalid.
+
+    Returns ``False`` when Telegram rejects the send; the caller must
+    then report the failure instead of claiming success.
+    """
+
     text = formatting.format_preview_text(data)
     markup = formatting.preview_keyboard(
         data.get("confirmation_token") or ""
     )
-    preview_id = data.get("preview_message_id")
 
-    if preview_id is not None:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=data.get("chat_id"),
-                message_id=preview_id,
-                text=text,
-                reply_markup=markup,
-            )
-            return
-        except Exception:
-            logger.warning("Could not refresh the report preview message.")
+    await _remove_previous_keyboard(message, data)
 
-    sent = await message.answer(text, reply_markup=markup)
-    await state.update_data(
-        preview_message_id=getattr(sent, "message_id", None)
-    )
+    try:
+        sent = await message.answer(text, reply_markup=markup)
+    except Exception:
+        logger.exception("Could not send the updated report preview.")
+        await message.answer(
+            "Güncellenmiş rapor önizlemesi Telegram'a "
+            "gönderilemedi. Taslağınız kaybolmadı; lütfen "
+            "/gorevlerim komutuyla rapor akışını yeniden başlatın."
+        )
+        return False
+
+    data["preview_message_id"] = getattr(sent, "message_id", None)
+    await state.set_data(data)
+    return True
 
 
 @router.message(Command("gorevlerim", "rapor"))
@@ -575,8 +614,9 @@ async def _handle_field_edit_text(
     await state.set_data(data)
     await state.set_state(ReportFlow.reviewing)
 
-    await message.answer("Bilgi güncellendi. Güncel önizleme:")
-    await _render_preview(message, state, data)
+    # The updated report is delivered as a new message at the end of
+    # the chat, with a keyboard built from the rotated token.
+    await _send_fresh_preview(message, state, data)
 
 
 @router.callback_query(F.data == "rep:edit")
@@ -773,9 +813,15 @@ async def edit_status_handler(
     await state.set_data(data)
     await state.set_state(ReportFlow.reviewing)
 
-    await callback.answer("Durum güncellendi.")
+    sent = await _send_fresh_preview(callback.message, state, data)
 
-    await _render_preview(callback.message, state, data)
+    if sent:
+        await callback.answer("Durum güncellendi.")
+    else:
+        await callback.answer(
+            "Önizleme güncellenemedi.",
+            show_alert=True,
+        )
 
 
 @router.callback_query(F.data == "rep:back")
@@ -816,8 +862,15 @@ async def back_to_preview_handler(
     await state.set_data(data)
     await state.set_state(ReportFlow.reviewing)
 
-    await callback.answer()
-    await _render_preview(callback.message, state, data)
+    sent = await _send_fresh_preview(callback.message, state, data)
+
+    if sent:
+        await callback.answer()
+    else:
+        await callback.answer(
+            "Önizleme güncellenemedi.",
+            show_alert=True,
+        )
 
 
 @router.callback_query(F.data == "rep:cancel")

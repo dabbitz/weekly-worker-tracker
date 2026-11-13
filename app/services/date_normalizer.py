@@ -44,6 +44,36 @@ WEEKDAY_FORMS = {
     "pazar": ["pazar", "pazara"],
 }
 
+# Turkish month names, including common ASCII spellings typed without
+# Turkish characters. Text is casefolded before matching.
+MONTHS = {
+    "ocak": 1,
+    "şubat": 2,
+    "subat": 2,
+    "mart": 3,
+    "nisan": 4,
+    "mayıs": 5,
+    "mayis": 5,
+    "haziran": 6,
+    "temmuz": 7,
+    "ağustos": 8,
+    "agustos": 8,
+    "eylül": 9,
+    "eylul": 9,
+    "ekim": 10,
+    "kasım": 11,
+    "kasim": 11,
+    "aralık": 12,
+    "aralik": 12,
+}
+
+_DAY_MONTH_PATTERN = re.compile(
+    r"(?<!\d)(\d{1,2})\s+"
+    r"(ocak|şubat|subat|mart|nisan|mayıs|mayis|haziran|temmuz|"
+    r"ağustos|agustos|eylül|eylul|ekim|kasım|kasim|aralık|aralik)"
+    r"(?:\s+(\d{4}))?(?!\d)"
+)
+
 
 def _result(
     normalized_date: date | None,
@@ -105,6 +135,87 @@ def _parse_explicit_date(value: str) -> date | None:
     return None
 
 
+def _find_weekdays(normalized_text: str) -> list[str]:
+    """Return every weekday name mentioned in the text."""
+
+    found: list[str] = []
+
+    for weekday_name, forms in WEEKDAY_FORMS.items():
+        for form in forms:
+            if re.search(
+                rf"(?<!\w){re.escape(form)}(?!\w)",
+                normalized_text
+            ):
+                found.append(weekday_name)
+                break
+
+    return found
+
+
+def _weekday_mismatch(
+    parsed: date,
+    weekday_matches: list[str],
+) -> str | None:
+    """Validate a weekday mentioned next to an explicit calendar date."""
+
+    unique_weekdays = set(weekday_matches)
+
+    if len(unique_weekdays) > 1:
+        return "More than one weekday was mentioned."
+
+    if len(unique_weekdays) == 1:
+        weekday_name = next(iter(unique_weekdays))
+
+        if parsed.weekday() != WEEKDAYS[weekday_name]:
+            return (
+                "The mentioned weekday does not match the supplied "
+                "calendar date."
+            )
+
+    return None
+
+
+def _parse_day_month_dates(
+    normalized_text: str,
+    reference_date: date,
+) -> list[date]:
+    """Parse day + Turkish month name expressions such as ``20 Kasım``.
+
+    A missing year is resolved to the next occurrence of that day and
+    month, so a report written in November about ``5 Ocak`` points to
+    the following January. Invalid days raise ``ValueError`` instead of
+    being guessed.
+    """
+
+    parsed_dates: list[date] = []
+
+    for match in _DAY_MONTH_PATTERN.finditer(normalized_text):
+        day = int(match.group(1))
+        month = MONTHS[match.group(2)]
+        year_text = match.group(3)
+
+        year = (
+            int(year_text)
+            if year_text is not None
+            else reference_date.year
+        )
+
+        try:
+            candidate = date(year, month, day)
+        except ValueError as exc:
+            raise ValueError("invalid calendar date") from exc
+
+        if year_text is None and candidate < reference_date:
+            try:
+                candidate = date(year + 1, month, day)
+            except ValueError as exc:
+                raise ValueError("invalid calendar date") from exc
+
+        parsed_dates.append(candidate)
+
+    return parsed_dates
+
+
 def normalize_eta_date(
     eta_text: str | None,
     reference_datetime: datetime,
@@ -125,6 +236,7 @@ def normalize_eta_date(
 
     reference_date = _get_reference_date(reference_datetime)
     normalized_text = eta_text.casefold().strip()
+    weekday_matches = _find_weekdays(normalized_text)
 
     # --------------------------------------
     # 1. Explicit calendar dates
@@ -139,6 +251,15 @@ def normalize_eta_date(
         parsed = _parse_explicit_date(iso_match.group())
 
         if parsed:
+            mismatch = _weekday_mismatch(parsed, weekday_matches)
+
+            if mismatch is not None:
+                return _result(
+                    None,
+                    EtaResolutionStatus.AMBIGUOUS,
+                    mismatch
+                )
+
             return _result(parsed, EtaResolutionStatus.RESOLVED)
 
         return _result(
@@ -156,6 +277,15 @@ def normalize_eta_date(
         parsed = _parse_explicit_date(local_match.group())
 
         if parsed:
+            mismatch = _weekday_mismatch(parsed, weekday_matches)
+
+            if mismatch is not None:
+                return _result(
+                    None,
+                    EtaResolutionStatus.AMBIGUOUS,
+                    mismatch
+                )
+
             return _result(parsed, EtaResolutionStatus.RESOLVED)
 
         return _result(
@@ -163,6 +293,42 @@ def normalize_eta_date(
             EtaResolutionStatus.INVALID,
             "The supplied calendar date is invalid."
         )
+
+    # --------------------------------------
+    # 1b. Day + Turkish month name dates
+    # --------------------------------------
+
+    if _DAY_MONTH_PATTERN.search(normalized_text):
+        try:
+            parsed_dates = _parse_day_month_dates(
+                normalized_text,
+                reference_date,
+            )
+        except ValueError:
+            return _result(
+                None,
+                EtaResolutionStatus.INVALID,
+                "The supplied calendar date is invalid."
+            )
+
+        if len(set(parsed_dates)) > 1:
+            return _result(
+                None,
+                EtaResolutionStatus.AMBIGUOUS,
+                "More than one calendar date was mentioned."
+            )
+
+        parsed = parsed_dates[0]
+        mismatch = _weekday_mismatch(parsed, weekday_matches)
+
+        if mismatch is not None:
+            return _result(
+                None,
+                EtaResolutionStatus.AMBIGUOUS,
+                mismatch
+            )
+
+        return _result(parsed, EtaResolutionStatus.RESOLVED)
 
     # --------------------------------------
     # 2. Relative day expressions
@@ -180,18 +346,6 @@ def normalize_eta_date(
         for pattern, days in relative_days
         if re.search(pattern, normalized_text)
     ]
-
-    # Also check if a weekday is mentioned.
-    weekday_matches = []
-
-    for weekday_name, forms in WEEKDAY_FORMS.items():
-        for form in forms:
-            if re.search(
-                rf"(?<!\w){re.escape(form)}(?!\w)",
-                normalized_text
-            ):
-                weekday_matches.append(weekday_name)
-                break
 
     # Multiple different date expressions can be ambiguous.
     if relative_matches and weekday_matches:

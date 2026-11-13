@@ -17,6 +17,10 @@ REFERENCE_DATETIME = datetime(
 TEST_CASES = [
     ("cuma gününe kadar", date(2026, 11, 13)),
     ("cuma", date(2026, 11, 13)),
+    ("20 Kasım Cuma gününe kadar", date(2026, 11, 20)),
+    ("20.11.2026", date(2026, 11, 20)),
+    ("16 Kasım Pazartesi", date(2026, 11, 16)),
+    ("13 Kasım Cuma", date(2026, 11, 13)),
     ("yarın", date(2026, 11, 12)),
     ("bugün", date(2026, 11, 11)),
     ("öbür gün", date(2026, 11, 13)),

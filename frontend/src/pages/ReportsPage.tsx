@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CheckCircle2,
   ClipboardList,
@@ -21,19 +21,22 @@ import { Alert } from '../components/ui/Alert'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Pagination } from '../components/ui/Pagination'
 import { StatCard } from '../components/ui/StatCard'
+import { useToast } from '../components/ui/Toast'
 import {
   formatDateTime,
   getErrorMessage,
   reportReviewStatusMeta,
   workStatusMeta,
 } from '../lib/utils'
-import type { WorkStatus } from '../types'
+import type { ReportListItem, WorkStatus } from '../types'
 
 const PAGE_SIZE = 15
 
@@ -66,6 +69,10 @@ export function ReportsPage() {
   const [selectedReportId, setSelectedReportId] = useState<number | null>(
     null,
   )
+  const [deletingReport, setDeletingReport] =
+    useState<ReportListItem | null>(null)
+  const queryClient = useQueryClient()
+  const { showToast } = useToast()
 
   const projectsQuery = useQuery({
     queryKey: ['projects', 'options'],
@@ -117,6 +124,23 @@ export function ReportsPage() {
       }),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => reportsApi.remove(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['reports'] })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      if (deletingReport?.id === selectedReportId) {
+        setSelectedReportId(null)
+      }
+      setDeletingReport(null)
+      showToast('Rapor silindi.', 'success')
+    },
+    onError: (error) => {
+      setDeletingReport(null)
+      showToast(getErrorMessage(error), 'error')
+    },
+  })
+
   const projects = projectsQuery.data ?? []
   const employees = employeesQuery.data?.items ?? []
   const tasks = tasksQuery.data?.items ?? []
@@ -156,8 +180,7 @@ export function ReportsPage() {
     <div className="space-y-5">
       <PageHeader
         title="Raporlar"
-        description="Çalışanların ilettiği ve AI ile yapılandırılan iş raporlarını inceleyin. Bu ekran salt okunurdur."
-        actions={<Badge tone="neutral">Salt okunur</Badge>}
+        description="Çalışanların ilettiği ve AI ile yapılandırılan iş raporlarını inceleyin. Yönetici yalnızca seçili raporu silebilir; rapor silmek görev, plan veya çalışan kaydını değiştirmez."
       />
 
       {reportsQuery.isError ? null : (
@@ -440,7 +463,7 @@ export function ReportsPage() {
                   <th scope="col">Engel / Gecikme</th>
                   <th scope="col">Çalışan onayı</th>
                   <th scope="col" className="text-right">
-                    Detay
+                    İşlem
                   </th>
                 </tr>
               </thead>
@@ -542,7 +565,7 @@ export function ReportsPage() {
                         </Badge>
                       </td>
                       <td>
-                        <div className="flex justify-end">
+                        <div className="flex items-center justify-end gap-1">
                           <Button
                             variant="ghost"
                             size="sm"
@@ -561,6 +584,17 @@ export function ReportsPage() {
                           >
                             Görüntüle
                           </Button>
+                          <DeleteButton
+                            label={`Raporu sil: ${
+                              report.task_title ?? report.id
+                            }`}
+                            onClick={() => setDeletingReport(report)}
+                            disabled={deleteMutation.isPending}
+                            isDeleting={
+                              deleteMutation.isPending &&
+                              deleteMutation.variables === report.id
+                            }
+                          />
                         </div>
                       </td>
                     </tr>
@@ -585,12 +619,44 @@ export function ReportsPage() {
           aria-hidden="true"
         />
         <p className="text-xs leading-5 text-slate-500">
-          Bu ekran salt okunurdur. Raporlar silinemez, düzenlenemez;
-          çalışan onayı, haftalık planlar veya görev ilerlemesi buradan
-          değiştirilemez. Çalışan onayı, çalışanın AI analizini
-          onayladığını gösterir; yönetici onayı değildir.
+          Yönetici yalnızca seçili raporu silebilir. Rapor silme işlemi
+          görevi, haftalık planı, çalışan kaydını veya diğer raporları
+          değiştirmez. Çalışan onayı, çalışanın AI analizini onayladığını
+          gösterir; yönetici onayı değildir.
         </p>
       </div>
+
+      <ConfirmDialog
+        open={deletingReport !== null}
+        title="Raporu sil"
+        description={
+          <>
+            <p>
+              <strong className="text-worktrack-ink">
+                {deletingReport?.task_title ?? 'Seçili rapor'}
+              </strong>{' '}
+              raporunu silmek istediğinizden emin misiniz?
+            </p>
+            <p>
+              Bu işlem geri alınamaz. Yalnızca bu rapor kaydı silinir;
+              ilgili görev, haftalık plan ve çalışan kayıtları korunur.
+            </p>
+          </>
+        }
+        confirmLabel="Raporu sil"
+        tone="danger"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deletingReport && !deleteMutation.isPending) {
+            deleteMutation.mutate(deletingReport.id)
+          }
+        }}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeletingReport(null)
+          }
+        }}
+      />
 
       <ReportDetailModal
         reportId={selectedReportId}

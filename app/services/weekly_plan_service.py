@@ -48,10 +48,6 @@ logger = logging.getLogger("worktrack.weekly_plans")
 MAX_AI_WEEKS_PER_TASK = 104
 
 EDITABLE_STATUSES = {WeeklyPlanStatus.DRAFT.value}
-DELETABLE_STATUSES = {
-    WeeklyPlanStatus.DRAFT.value,
-    WeeklyPlanStatus.REJECTED.value,
-}
 
 
 class AIPlanOutputError(RuntimeError):
@@ -545,17 +541,18 @@ async def delete_plan(
     session: AsyncSession,
     plan_id: int,
 ) -> None:
+    """Delete a weekly plan in any lifecycle state.
+
+    Reports referencing the plan are historical records; they block the
+    deletion and must be removed explicitly by the administrator first.
+    Approved/superseded plans are deletable because the administrator owns
+    the planning data, but no report history is ever removed implicitly.
+    """
+
     plan = await session.get(WeeklyTaskPlan, plan_id)
 
     if plan is None:
         raise NotFoundError("Haftalık plan bulunamadı.")
-
-    if plan.status not in DELETABLE_STATUSES:
-        raise ConflictError(
-            "Onaylanmış veya eski sürüm planlar fiziksel olarak "
-            "silinemez. Geçmiş kayıtların korunması için planı "
-            "reddedin veya yeni bir sürüm onaylayın."
-        )
 
     update_count = int(
         (
@@ -569,8 +566,9 @@ async def delete_plan(
 
     if update_count > 0:
         raise ConflictError(
-            "Bu plana bağlı iş güncellemeleri var. Geçmiş kayıtların "
-            "tutarlılığı için plan silinemez."
+            f"Bu plana bağlı {update_count} iş raporu bulunuyor. "
+            "Rapor geçmişinin korunması için plan silinemez. "
+            "Lütfen önce ilgili raporları silin."
         )
 
     await session.delete(plan)

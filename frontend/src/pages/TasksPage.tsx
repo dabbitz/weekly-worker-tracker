@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   CalendarDays,
   ListChecks,
@@ -27,6 +27,8 @@ import { AIGeneratePlansDialog } from '../components/weekly-plans/AIGeneratePlan
 import { AvatarGroup } from '../components/ui/Avatar'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
@@ -52,8 +54,28 @@ export function TasksPage() {
   const [editingTask, setEditingTask] = useState<Task | null>(null)
   const [selectedTaskIds, setSelectedTaskIds] = useState<number[]>([])
   const [aiDialogOpen, setAiDialogOpen] = useState(false)
+  const [deletingTask, setDeletingTask] = useState<Task | null>(null)
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { showToast } = useToast()
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => tasksApi.remove(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['projects'] })
+      void queryClient.invalidateQueries({ queryKey: ['weekly-plans'] })
+      void queryClient.invalidateQueries({ queryKey: ['employees'] })
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      setDeletingTask(null)
+      setSelectedTaskIds([])
+      showToast('Görev silindi.', 'success')
+    },
+    onError: (error) => {
+      setDeletingTask(null)
+      showToast(getErrorMessage(error), 'error')
+    },
+  })
 
   const projectsQuery = useQuery({
     queryKey: ['projects', 'options'],
@@ -478,7 +500,7 @@ export function TasksPage() {
                       </Link>
                     </td>
                     <td>
-                      <div className="flex justify-end">
+                      <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
                           onClick={() => openEdit(task)}
@@ -491,6 +513,15 @@ export function TasksPage() {
                             aria-hidden="true"
                           />
                         </button>
+                        <DeleteButton
+                          label={`${task.title} görevini sil`}
+                          onClick={() => setDeletingTask(task)}
+                          disabled={deleteMutation.isPending}
+                          isDeleting={
+                            deleteMutation.isPending &&
+                            deleteMutation.variables === task.id
+                          }
+                        />
                       </div>
                     </td>
                   </tr>
@@ -520,6 +551,39 @@ export function TasksPage() {
         defaultProjectId={
           projectId ? Number(projectId) : undefined
         }
+      />
+
+      <ConfirmDialog
+        open={deletingTask !== null}
+        title="Görevi sil"
+        description={
+          <>
+            <p>
+              <strong className="text-worktrack-ink">
+                {deletingTask?.title}
+              </strong>{' '}
+              adlı görevi silmek istediğinizden emin misiniz?
+            </p>
+            <p>
+              Bu işlem geri alınamaz. Görevin çalışan atamaları ve haftalık
+              planları da silinir. Göreve bağlı iş raporu varsa silme
+              engellenir; önce ilgili raporları silmelisiniz.
+            </p>
+          </>
+        }
+        confirmLabel="Görevi sil"
+        tone="danger"
+        isLoading={deleteMutation.isPending}
+        onConfirm={() => {
+          if (deletingTask && !deleteMutation.isPending) {
+            deleteMutation.mutate(deletingTask.id)
+          }
+        }}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setDeletingTask(null)
+          }
+        }}
       />
 
       {aiDialogOpen ? (
