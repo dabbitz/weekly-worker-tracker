@@ -19,6 +19,7 @@ from sqlalchemy import (
     text,
 )
 
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -881,3 +882,147 @@ class TaskUpdate(Base):
         back_populates="reviewed_updates",
         foreign_keys=[reviewed_by_employee_id]
     )
+
+
+# ==========================================
+# WEEKLY MANAGER REPORTS
+# ==========================================
+
+class WeeklyManagerReport(Base):
+    """Stored AI-assisted weekly manager report document.
+
+    The report is intentionally self-contained. It has no foreign keys to
+    tasks, projects, employees, plans or reports, so deleting a source row
+    later cannot break the historical document. Real identifiers and labels
+    live in ``references``; the AI narrative stores only tokens that are
+    resolved against that snapshot when the report is read.
+    """
+
+    __tablename__ = "weekly_manager_reports"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="ck_weekly_manager_reports_status"
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_weekly_manager_reports_version"
+        ),
+        CheckConstraint(
+            "week_end_date >= week_start_date",
+            name="ck_weekly_manager_reports_date_range"
+        ),
+        UniqueConstraint(
+            "week_start_date",
+            "version",
+            name="uq_weekly_manager_reports_week_version"
+        ),
+        UniqueConstraint(
+            "request_id",
+            name="uq_weekly_manager_reports_request_id"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True
+    )
+
+    week_start_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False
+    )
+
+    week_end_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False
+    )
+
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'")
+    )
+
+    request_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False
+    )
+
+    request_fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False
+    )
+
+    model: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True
+    )
+
+    is_partial_week: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false")
+    )
+
+    extra_instructions: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    metrics_snapshot: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb")
+    )
+
+    data_quality: Mapped[list] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb")
+    )
+
+    narrative: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True
+    )
+
+    references: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb")
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+
+Index(
+    "ix_weekly_manager_reports_week_version",
+    WeeklyManagerReport.week_start_date.desc(),
+    WeeklyManagerReport.version.desc(),
+)

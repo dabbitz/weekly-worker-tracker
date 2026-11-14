@@ -249,7 +249,7 @@ to the same Neon database through the FastAPI backend.
 | Görevler | Create/edit tasks, assign multiple employees, and start AI weekly planning for selected tasks |
 | Haftalık Planlar | Review AI drafts or create manual plans; edit, approve, reject, regenerate, and inspect history |
 | Kayıt Talepleri | Read-only Telegram registration history; decisions stay in Telegram |
-| Raporlar | Clearly marked later-phase report plan with no fabricated metrics |
+| Raporlar | Inspect employee work reports and generate/read AI-assisted weekly manager reports |
 
 Key behavior:
 
@@ -283,6 +283,52 @@ Key behavior:
   physically removed; history is preserved.
 - Generation requests are idempotent per `request_id` plus a content
   fingerprint, so retrying a failed request does not create duplicates.
+
+### Weekly manager reports
+
+- **Raporlar → Haftalık Yönetici Raporları** creates a stored management
+  report for one Monday–Sunday week. Generation is always started manually;
+  there is no scheduler or background worker.
+- All numbers come from the deterministic engine in
+  `app/services/weekly_report_metrics.py`. Gemini only interprets those
+  numbers and is rejected by validation if it introduces a number, date,
+  token, or classification that is not in the deterministic snapshot.
+- `target_completion_percentage` (weekly target) and
+  `completion_percentage` (employee-reported progress) are never presented
+  as the same value. Percentages from different employees are never
+  averaged, and no project-level progress percentage is calculated.
+- Only `approved` work reports enter activity metrics. `pending` reports are
+  excluded from activity and counted separately; `rejected` reports are
+  excluded.
+- Missing reports are neutral (“Rapor gönderilmedi”); the report never
+  states that an unreported task was not done.
+- Weeks use Europe/Istanbul Monday–Sunday boundaries. The last completed
+  week is the default; the current week can be generated with a
+  “Kısmi değerlendirme” label, and future weeks are rejected.
+- Report periods are selected from `TaskUpdate.received_at` (database insert
+  time). The Telegram message timestamp is not stored as a separate column,
+  so a report submitted near midnight may fall on the other side of a week
+  boundary than the original message. This limitation is documented in the
+  stored `metrics_snapshot.methodology` and shown in the report’s
+  calculation explanation.
+- The Gemini payload contains tokens (`E#`, `T#`, `P#`, `U#`, `W#`,
+  `WEEK#`) and a separate generic `ai_references` map. It never contains
+  employee names, Telegram user/chat/message IDs, database IDs, original
+  messages, or secrets. Free-text fields are additionally scrubbed of known
+  employee names before the call. Real IDs and snapshot labels stay in the
+  stored `references` column and are returned only to the authenticated
+  dashboard; they are never sent to Gemini.
+- A `request_id` is unique. Repeating it with the same content returns the
+  existing report without calling Gemini; using it with different content
+  returns `409`. A new `request_id` creates a new version and keeps old
+  versions. Failed versions can be retried in place.
+- `weekly_manager_reports` has no foreign keys to source tables, so deleting
+  a task or employee cannot break stored report history. Deleting a report
+  removes only that report document.
+- The database table is added by
+  `alembic/versions/0003_weekly_manager_reports.py`. It is additive only and
+  must be applied with the normal migration workflow before using the
+  feature against a database.
 
 ---
 

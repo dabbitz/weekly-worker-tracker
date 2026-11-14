@@ -20,6 +20,7 @@ import { RegistrationRequestsPage } from './pages/RegistrationRequestsPage'
 import { ReportsPage } from './pages/ReportsPage'
 import { TasksPage } from './pages/TasksPage'
 import { WeeklyPlansPage } from './pages/WeeklyPlansPage'
+import { WeeklyReportPage } from './pages/WeeklyReportPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -70,6 +71,10 @@ export default function App() {
                     element={<RegistrationRequestsPage />}
                   />
                   <Route path="raporlar" element={<ReportsPage />} />
+                  <Route
+                    path="raporlar/haftalik/:reportId"
+                    element={<WeeklyReportPage />}
+                  />
                   <Route path="*" element={<NotFoundPage />} />
                 </Route>
               </Route>

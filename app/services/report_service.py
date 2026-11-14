@@ -6,7 +6,7 @@ Deleting a report removes only that report row: related tasks, plans,
 employees and projects are never modified.
 """
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,14 +29,13 @@ from app.schemas.report import (
 )
 from app.schemas.work_update import WorkStatus
 from app.services.exceptions import NotFoundError, ValidationError
-from app.services.week_utils import TIMEZONE
+from app.services.week_utils import istanbul_day_start_utc
 
 
 def _istanbul_day_start_utc(day: date) -> datetime:
     """Return the UTC instant when ``day`` starts in Istanbul."""
 
-    local_midnight = datetime.combine(day, time.min, tzinfo=TIMEZONE)
-    return local_midnight.astimezone(timezone.utc)
+    return istanbul_day_start_utc(day)
 
 
 def _has_text(expression) -> object:

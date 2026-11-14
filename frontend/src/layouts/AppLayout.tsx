@@ -41,6 +41,9 @@ function resolveTitle(pathname: string): string {
   if (pathname === '/gorevler') return 'Görevler'
   if (pathname === '/haftalik-planlar') return 'Haftalık Planlar'
   if (pathname === '/kayit-talepleri') return 'Kayıt Talepleri'
+  if (pathname.startsWith('/raporlar/haftalik/')) {
+    return 'Haftalık Yönetici Raporu'
+  }
   if (pathname === '/raporlar') return 'Raporlar'
   return 'WorkTrack'
 }

@@ -28,6 +28,12 @@ import type {
   WeeklyPlanPayload,
   WeeklyPlanSource,
   WeeklyPlanStatus,
+  WeeklyReportCreatePayload,
+  WeeklyReportDetail,
+  WeeklyReportListResponse,
+  WeeklyReportPeriodsResponse,
+  WeeklyReportPreview,
+  WeeklyReportStatus,
   WorkStatus,
 } from '../types'
 
@@ -281,6 +287,61 @@ export const reportsApi = {
 
   remove(id: number): Promise<void> {
     return request<void>(`/reports/${id}`, {
+      method: 'DELETE',
+    })
+  },
+}
+
+export interface WeeklyReportListParams {
+  page?: number
+  page_size?: number
+  week_start_date?: string
+  status?: WeeklyReportStatus
+}
+
+export const weeklyReportsApi = {
+  periods(weeks = 12): Promise<WeeklyReportPeriodsResponse> {
+    return request<WeeklyReportPeriodsResponse>(
+      `/weekly-reports/periods${buildQuery({ weeks })}`,
+    )
+  },
+
+  preview(weekStartDate: string): Promise<WeeklyReportPreview> {
+    return request<WeeklyReportPreview>(
+      `/weekly-reports/preview${buildQuery({
+        week_start_date: weekStartDate,
+      })}`,
+    )
+  },
+
+  create(payload: WeeklyReportCreatePayload): Promise<WeeklyReportDetail> {
+    return request<WeeklyReportDetail>('/weekly-reports', {
+      method: 'POST',
+      body: payload,
+    })
+  },
+
+  list(
+    params: WeeklyReportListParams = {},
+  ): Promise<WeeklyReportListResponse> {
+    return request<WeeklyReportListResponse>(
+      `/weekly-reports${buildQuery(params)}`,
+    )
+  },
+
+  get(id: number): Promise<WeeklyReportDetail> {
+    return request<WeeklyReportDetail>(`/weekly-reports/${id}`)
+  },
+
+  retry(id: number): Promise<WeeklyReportDetail> {
+    return request<WeeklyReportDetail>(
+      `/weekly-reports/${id}/retry`,
+      { method: 'POST' },
+    )
+  },
+
+  remove(id: number): Promise<void> {
+    return request<void>(`/weekly-reports/${id}`, {
       method: 'DELETE',
     })
   },

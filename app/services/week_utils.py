@@ -6,13 +6,25 @@ These helpers keep that behaviour unchanged; they only answer date
 questions for the employee-facing report flow.
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.database.models import WeeklyTaskPlan
 
 
 TIMEZONE = ZoneInfo("Europe/Istanbul")
+
+
+def istanbul_day_start_utc(day: date) -> datetime:
+    """Return the UTC instant when ``day`` starts in Istanbul.
+
+    This is the single implementation used by both the employee report
+    listing and the weekly manager report metrics so their date windows
+    cannot drift apart.
+    """
+
+    local_midnight = datetime.combine(day, time.min, tzinfo=TIMEZONE)
+    return local_midnight.astimezone(timezone.utc)
 
 
 def istanbul_today(now: datetime | None = None) -> date:

@@ -1,14 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  BarChart3,
   CheckCircle2,
   ClipboardList,
   Clock3,
   Eye,
   Lock,
   OctagonAlert,
+  Sparkles,
   TriangleAlert,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
   employeesApi,
@@ -30,7 +33,10 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { Pagination } from '../components/ui/Pagination'
 import { StatCard } from '../components/ui/StatCard'
 import { useToast } from '../components/ui/Toast'
+import { GenerateWeeklyReportDialog } from '../components/weekly-reports/GenerateWeeklyReportDialog'
+import { WeeklyReportHistory } from '../components/weekly-reports/WeeklyReportHistory'
 import {
+  cn,
   formatDateTime,
   getErrorMessage,
   reportReviewStatusMeta,
@@ -56,7 +62,7 @@ function completionTone(percentage: number | null) {
   return 'neutral' as const
 }
 
-export function ReportsPage() {
+function EmployeeReportsTab() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [projectId, setProjectId] = useState('')
@@ -73,6 +79,31 @@ export function ReportsPage() {
     useState<ReportListItem | null>(null)
   const queryClient = useQueryClient()
   const { showToast } = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const reportParam = searchParams.get('rapor')
+
+  useEffect(() => {
+    if (!reportParam) {
+      return
+    }
+
+    const parsed = Number(reportParam)
+
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setSelectedReportId(parsed)
+    }
+  }, [reportParam])
+
+  const closeSelectedReport = () => {
+    setSelectedReportId(null)
+
+    if (reportParam) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('rapor')
+      setSearchParams(next, { replace: true })
+    }
+  }
 
   const projectsQuery = useQuery({
     queryKey: ['projects', 'options'],
@@ -178,11 +209,6 @@ export function ReportsPage() {
 
   return (
     <div className="space-y-5">
-      <PageHeader
-        title="Raporlar"
-        description="Çalışanların ilettiği ve AI ile yapılandırılan iş raporlarını inceleyin. Yönetici yalnızca seçili raporu silebilir; rapor silmek görev, plan veya çalışan kaydını değiştirmez."
-      />
-
       {reportsQuery.isError ? null : (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           <StatCard
@@ -660,7 +686,101 @@ export function ReportsPage() {
 
       <ReportDetailModal
         reportId={selectedReportId}
-        onClose={() => setSelectedReportId(null)}
+        onClose={closeSelectedReport}
+      />
+    </div>
+  )
+}
+
+type ReportsTab = 'employee' | 'weekly'
+
+export function ReportsPage() {
+  const [generateOpen, setGenerateOpen] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
+
+  const tab: ReportsTab =
+    searchParams.get('sekme') === 'haftalik' ? 'weekly' : 'employee'
+
+  const changeTab = (next: ReportsTab) => {
+    const params = new URLSearchParams(searchParams)
+
+    if (next === 'weekly') {
+      params.set('sekme', 'haftalik')
+    } else {
+      params.delete('sekme')
+    }
+
+    setSearchParams(params, { replace: true })
+  }
+
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        title="Raporlar"
+        description="Çalışanların ilettiği iş raporlarını inceleyin veya seçilen hafta için AI destekli yönetici raporu oluşturun. Rapor belgesi silmek görev, plan veya çalışan kayıtlarını değiştirmez."
+        actions={
+          <Button
+            onClick={() => setGenerateOpen(true)}
+            leftIcon={<Sparkles className="h-4 w-4" />}
+          >
+            Haftalık Yönetici Raporu Oluştur
+          </Button>
+        }
+      />
+
+      <div
+        className="flex flex-wrap gap-1 rounded-lg border border-worktrack-line bg-white p-1"
+        role="tablist"
+        aria-label="Rapor türleri"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'employee'}
+          onClick={() => changeTab('employee')}
+          className={cn(
+            'inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-worktrack-blue',
+            tab === 'employee'
+              ? 'bg-worktrack-blue/10 text-worktrack-blue-dark'
+              : 'text-slate-600 hover:bg-slate-50 hover:text-worktrack-ink',
+          )}
+        >
+          <ClipboardList className="h-4 w-4" aria-hidden="true" />
+          Çalışan İş Raporları
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'weekly'}
+          onClick={() => changeTab('weekly')}
+          className={cn(
+            'inline-flex items-center gap-2 rounded-md px-3.5 py-2 text-sm font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-worktrack-blue',
+            tab === 'weekly'
+              ? 'bg-worktrack-blue/10 text-worktrack-blue-dark'
+              : 'text-slate-600 hover:bg-slate-50 hover:text-worktrack-ink',
+          )}
+        >
+          <BarChart3 className="h-4 w-4" aria-hidden="true" />
+          Haftalık Yönetici Raporları
+        </button>
+      </div>
+
+      {tab === 'employee' ? (
+        <EmployeeReportsTab />
+      ) : (
+        <WeeklyReportHistory
+          onGenerate={() => setGenerateOpen(true)}
+        />
+      )}
+
+      <GenerateWeeklyReportDialog
+        open={generateOpen}
+        onClose={() => setGenerateOpen(false)}
+        onOpenReport={(reportId) => {
+          setGenerateOpen(false)
+          navigate(`/raporlar/haftalik/${reportId}`)
+        }}
       />
     </div>
   )

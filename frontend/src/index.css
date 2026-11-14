@@ -99,3 +99,29 @@ dialog::backdrop {
     transition-duration: 0.01ms !important;
   }
 }
+
+@media print {
+  body {
+    background: white !important;
+  }
+
+  aside,
+  header,
+  .print-hide {
+    display: none !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  .card {
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .table-shell {
+    overflow: visible !important;
+  }
+}

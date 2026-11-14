@@ -16,6 +16,7 @@ from app.api.routes import (
     reports,
     tasks,
     weekly_plans,
+    weekly_reports,
 )
 from app.database.connection import close_database
 
@@ -92,6 +93,7 @@ app.include_router(tasks.router, prefix="/api")
 app.include_router(weekly_plans.router, prefix="/api")
 app.include_router(registration_requests.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
+app.include_router(weekly_reports.router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)

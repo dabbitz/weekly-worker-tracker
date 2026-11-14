@@ -71,6 +71,7 @@ def test_no_project_memberships_table_or_direct_link():
         "weekly_plan_generations",
         "task_updates",
         "registration_requests",
+        "weekly_manager_reports",
     }
 
     assert "project_id" not in Employee.__table__.columns
