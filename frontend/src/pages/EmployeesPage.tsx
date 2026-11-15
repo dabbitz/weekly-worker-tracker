@@ -80,7 +80,7 @@ export function EmployeesPage() {
               setSearch(value)
               setPage(1)
             }}
-            placeholder="Ad soyad veya rol ara"
+            placeholder="Ad soyad veya pozisyon ara"
           />
           <div className="flex items-center gap-2">
             <label
@@ -187,7 +187,7 @@ export function EmployeesPage() {
                             {employee.full_name}
                           </Link>
                           <p className="text-xs text-slate-500">
-                            {employee.role ?? 'Rol belirtilmedi'}
+                            {employee.role ?? 'Pozisyon belirtilmedi'}
                           </p>
                         </div>
                       </div>

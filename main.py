@@ -5,6 +5,7 @@ import os
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.filters.command import CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from app.bot.handlers import (
     register_report_handlers,
     set_extractor,
 )
+from app.bot.states import RegistrationFlow
 from app.services.ai_service import WorkUpdateExtractor
 
 from aiogram.types import (
@@ -24,6 +26,7 @@ from aiogram.types import (
 from app.services.employee_service import (
     create_registration_request,
     mark_registration_notified,
+    normalize_role,
     review_registration_request,
 )
 
@@ -76,7 +79,8 @@ async def help_handler(message: Message):
         "/help - Yardım mesajını göster\n"
         "/gorevlerim - Görevlerini listele ve rapor gönder\n"
         "/rapor - /gorevlerim ile aynı işlev\n"
-        "/register İsim Soyisim - Kayıt talebi oluştur\n"
+        "/register İsim Soyisim - Kayıt talebi oluştur "
+        "(pozisyon bir sonraki adımda sorulur)\n"
     )
 
 
@@ -95,10 +99,39 @@ async def myid_handler(message: Message):
 # EMPLOYEE REGISTRATION
 # ==========================================
 
+POSITION_MAX_LENGTH = 80
+
+# The position is optional. These answers mean "not specified".
+POSITION_SKIP_TOKENS = {
+    "atla",
+    "/atla",
+    "geç",
+    "/geç",
+    "-",
+    "yok",
+    "belirtmek istemiyorum",
+}
+
+
+def _normalize_position(raw_value: str | None) -> str | None:
+    """Return a stored position label, or None when it was skipped."""
+
+    cleaned = " ".join((raw_value or "").split())
+
+    if not cleaned:
+        return None
+
+    if cleaned.casefold() in POSITION_SKIP_TOKENS:
+        return None
+
+    return normalize_role(cleaned)
+
+
 @dp.message(Command("register"))
 async def register_handler(
     message: Message,
-    command: CommandObject
+    command: CommandObject,
+    state: FSMContext,
 ):
 
     if message.chat.type != "private":
@@ -135,12 +168,104 @@ async def register_handler(
         )
         return
 
+    # Name and surname are valid; ask for the optional position next.
+    await state.clear()
+    await state.update_data(registration_full_name=full_name)
+    await state.set_state(RegistrationFlow.waiting_for_position)
+
+    await message.answer(
+        f"Ad Soyad: {full_name}\n\n"
+        "Pozisyonunuzu yazın.\n\n"
+        "Örnek: Yazılım Mühendisi, Elektrik Mühendisi, "
+        "Proje Yöneticisi, Teknisyen.\n\n"
+        "Pozisyon belirtmek istemiyorsanız /atla yazın. "
+        "Pozisyonu daha sonra yönetici de girebilir."
+    )
+
+
+@dp.message(RegistrationFlow.waiting_for_position, F.text)
+async def registration_position_handler(
+    message: Message,
+    state: FSMContext,
+):
+
+    if message.chat.type != "private":
+        await state.clear()
+        await message.answer(
+            "Lütfen kayıt işlemini botla özel sohbet üzerinden yap."
+        )
+        return
+
+    if message.from_user is None:
+        return
+
+    data = await state.get_data()
+    full_name = data.get("registration_full_name")
+
+    if not full_name:
+        await state.clear()
+        await message.answer(
+            "Kayıt akışı bulunamadı. "
+            "Lütfen /register İsim Soyisim ile yeniden başla."
+        )
+        return
+
+    if ADMIN_TELEGRAM_ID is None:
+        await state.clear()
+        await message.answer(
+            "Kayıt sistemi henüz yapılandırılmamış."
+        )
+        logging.error("ADMIN_TELEGRAM_ID is missing.")
+        return
+
+    raw_position = " ".join((message.text or "").split())
+
+    if (
+        raw_position.startswith("/")
+        and raw_position.casefold() not in POSITION_SKIP_TOKENS
+    ):
+        await message.answer(
+            "Pozisyonu düz metin olarak yazın. Atlamak için "
+            "/atla komutunu kullanabilirsiniz."
+        )
+        return
+
+    if len(raw_position) > POSITION_MAX_LENGTH:
+        await message.answer(
+            f"Pozisyon en fazla {POSITION_MAX_LENGTH} karakter "
+            "olabilir. Lütfen kısaltarak tekrar yazın veya /atla "
+            "ile devam edin."
+        )
+        return
+
+    position = _normalize_position(raw_position)
+
+    await state.clear()
+
+    await _submit_registration_request(
+        message,
+        full_name=full_name,
+        position=position,
+    )
+
+
+async def _submit_registration_request(
+    message: Message,
+    *,
+    full_name: str,
+    position: str | None,
+) -> None:
+
+    if message.from_user is None:
+        return
+
     try:
 
         request, state = await create_registration_request(
             telegram_user_id=message.from_user.id,
             telegram_chat_id=message.chat.id,
             full_name=full_name,
+            role=position,
         )
 
         if state == "already_registered":
@@ -183,6 +308,8 @@ async def register_handler(
                 "YENİ ÇALIŞAN KAYIT TALEBİ\n\n"
                 f"Başvuru No: #{request.id}\n"
                 f"Ad Soyad: {request.requested_full_name}\n"
+                f"Pozisyon: "
+                f"{request.requested_role or 'Belirtilmedi'}\n"
                 f"Telegram ID: {request.telegram_user_id}\n"
                 f"Kullanıcı adı: {username}\n\n"
                 "Bu kişinin sisteme katılmasını onaylıyor musunuz?"
@@ -213,6 +340,9 @@ async def register_handler(
 
             await message.answer(
                 "Kayıt talebin yöneticiye gönderildi!\n\n"
+                f"Ad Soyad: {request.requested_full_name}\n"
+                f"Pozisyon: "
+                f"{request.requested_role or 'Belirtilmedi'}\n\n"
                 "Yönetici onayını bekliyorsun. "
                 "Onaylandığında sana Telegram üzerinden "
                 "bilgi vereceğiz."
@@ -313,12 +443,14 @@ async def registration_decision_handler(
             admin_text = (
                 f"Başvuru #{request.id} ONAYLANDI.\n\n"
                 f"Çalışan: {employee.full_name}\n"
+                f"Pozisyon: {employee.role or 'Belirtilmedi'}\n"
                 f"Çalışan ID: {employee.id}"
             )
 
             applicant_text = (
                 "Kayıt talebin onaylandı!\n\n"
                 f"Çalışan: {employee.full_name}\n"
+                f"Pozisyon: {employee.role or 'Belirtilmedi'}\n"
                 f"Çalışan ID: {employee.id}\n"
                 "Hesap durumu: Aktif\n\n"
                 "Artık iş güncellemelerini bot üzerinden gönderebilirsin."

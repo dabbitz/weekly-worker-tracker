@@ -224,6 +224,9 @@ export function RegistrationRequestsPage() {
                         <p className="font-medium text-worktrack-ink">
                           {request.requested_full_name}
                         </p>
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          Pozisyon: {request.requested_role ?? 'Belirtilmedi'}
+                        </p>
                         <p className="mt-0.5 text-xs text-slate-400">
                           Talep #{request.id}
                         </p>

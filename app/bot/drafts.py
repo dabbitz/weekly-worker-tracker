@@ -127,6 +127,12 @@ def clamp_ai_draft(draft: WorkUpdate) -> WorkUpdate:
 
     The AI schema has no max length, so only the two length-limited
     columns are truncated. Optional blank strings become null.
+
+    The AI is also not allowed to report ``blocked`` without a stated
+    obstacle: a delay alone must not stop the work. When the AI returns
+    ``blocked`` with an empty blocker, the status falls back to
+    ``in_progress`` and the reported delay is preserved in
+    ``delay_reason``. An explicit obstacle keeps ``blocked`` unchanged.
     """
 
     data = draft.model_dump(mode="json")
@@ -149,6 +155,12 @@ def clamp_ai_draft(draft: WorkUpdate) -> WorkUpdate:
     eta_text = data.get("reported_eta_text")
     if isinstance(eta_text, str):
         data["reported_eta_text"] = eta_text[:ETA_TEXT_MAX]
+
+    if (
+        data.get("status") == WorkStatus.BLOCKED.value
+        and not data.get("blocker")
+    ):
+        data["status"] = WorkStatus.IN_PROGRESS.value
 
     return WorkUpdate.model_validate(data)
 

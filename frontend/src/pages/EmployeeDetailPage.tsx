@@ -4,6 +4,7 @@ import {
   ArrowRight,
   FolderKanban,
   ListChecks,
+  Pencil,
   UserRound,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -12,12 +13,15 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { employeesApi } from '../api/endpoints'
 import { Avatar } from '../components/ui/Avatar'
 import { Badge } from '../components/ui/Badge'
+import { Button } from '../components/ui/Button'
 import { Card, CardHeader } from '../components/ui/Card'
 import { ConfirmDialog } from '../components/ui/ConfirmDialog'
 import { DeleteButton } from '../components/ui/DeleteButton'
 import { EmptyState } from '../components/ui/EmptyState'
 import { ErrorState } from '../components/ui/ErrorState'
+import { Field, Input } from '../components/ui/Form'
 import { LoadingState } from '../components/ui/LoadingState'
+import { Modal } from '../components/ui/Modal'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useToast } from '../components/ui/Toast'
 import {
@@ -26,10 +30,15 @@ import {
   getErrorMessage,
 } from '../lib/utils'
 
+const POSITION_MAX_LENGTH = 80
+
 export function EmployeeDetailPage() {
   const { employeeId } = useParams()
   const id = Number(employeeId)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  const [positionOpen, setPositionOpen] = useState(false)
+  const [positionValue, setPositionValue] = useState('')
+  const [positionError, setPositionError] = useState<string | null>(null)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { showToast } = useToast()
@@ -38,6 +47,20 @@ export function EmployeeDetailPage() {
     queryKey: ['employees', 'detail', id],
     queryFn: () => employeesApi.get(id),
     enabled: Number.isFinite(id) && id > 0,
+  })
+
+  const positionMutation = useMutation({
+    mutationFn: (role: string | null) =>
+      employeesApi.update(id, { role }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['employees'] })
+      void queryClient.invalidateQueries({ queryKey: ['projects'] })
+      setPositionOpen(false)
+      showToast('Pozisyon güncellendi.', 'success')
+    },
+    onError: (error) => {
+      showToast(getErrorMessage(error), 'error')
+    },
   })
 
   const deleteMutation = useMutation({
@@ -133,10 +156,23 @@ export function EmployeeDetailPage() {
           <dl className="grid flex-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <dt className="text-xs font-medium tracking-wide text-slate-500 uppercase">
-                Rol
+                Pozisyon
               </dt>
-              <dd className="mt-1 text-sm font-medium text-slate-700">
+              <dd className="mt-1 flex items-center gap-2 text-sm font-medium text-slate-700">
                 {employee.role ?? 'Belirtilmedi'}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPositionValue(employee.role ?? '')
+                    setPositionError(null)
+                    setPositionOpen(true)
+                  }}
+                  className="rounded-md p-1 text-slate-400 transition hover:bg-slate-100 hover:text-worktrack-blue focus:outline-none focus-visible:ring-2 focus-visible:ring-worktrack-blue/40"
+                  aria-label="Pozisyonu düzenle"
+                  title="Pozisyonu düzenle"
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
               </dd>
             </div>
             <div>
@@ -292,6 +328,63 @@ export function EmployeeDetailPage() {
           </div>
         </Card>
       </div>
+      <Modal
+        open={positionOpen}
+        onClose={() => {
+          if (!positionMutation.isPending) {
+            setPositionOpen(false)
+          }
+        }}
+        title="Pozisyonu düzenle"
+        description="Çalışanın mesleği veya organizasyondaki pozisyonu. Bu alan hesap yetkisi vermez."
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              onClick={() => setPositionOpen(false)}
+              disabled={positionMutation.isPending}
+            >
+              Vazgeç
+            </Button>
+            <Button
+              onClick={() => {
+                const cleaned = positionValue.trim()
+
+                if (cleaned.length > POSITION_MAX_LENGTH) {
+                  setPositionError(
+                    `Pozisyon en fazla ${POSITION_MAX_LENGTH} karakter olabilir.`,
+                  )
+                  return
+                }
+
+                setPositionError(null)
+                positionMutation.mutate(cleaned ? cleaned : null)
+              }}
+              isLoading={positionMutation.isPending}
+            >
+              Kaydet
+            </Button>
+          </>
+        }
+      >
+        <Field
+          label="Pozisyon"
+          htmlFor="employee-position"
+          error={positionError ?? undefined}
+          hint="Boş bırakırsanız pozisyon bilgisi kaldırılır."
+        >
+          <Input
+            id="employee-position"
+            value={positionValue}
+            maxLength={POSITION_MAX_LENGTH}
+            placeholder="Örn. Elektrik Mühendisi"
+            invalid={positionError !== null}
+            onChange={(event) => setPositionValue(event.target.value)}
+          />
+        </Field>
+      </Modal>
+
       <ConfirmDialog
         open={deleteOpen}
         title="Çalışanı sil"

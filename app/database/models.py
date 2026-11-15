@@ -142,6 +142,15 @@ class RegistrationRequest(Base):
         nullable=False
     )
 
+    # Job title / position reported during registration. This is a
+    # profession label, not an authorization role. Optional: the
+    # administrator can fill it in later.
+
+    requested_role: Mapped[str | None] = mapped_column(
+        String(80),
+        nullable=True
+    )
+
     # Link to an existing employee if this is a reactivation request.
     # Otherwise, a new employee will be created after approval.
 

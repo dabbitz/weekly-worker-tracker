@@ -9,9 +9,10 @@ from app.database.models import (
     TaskUpdate,
 )
 from app.schemas.common import Page
-from app.schemas.employee import EmployeeRead
+from app.schemas.employee import EmployeeRead, EmployeeUpdate
 from app.schemas.employee_detail import EmployeeDetail
 from app.schemas.project import ProjectOption
+from app.services.employee_service import normalize_role
 from app.services.exceptions import ConflictError, NotFoundError
 from app.services.task_service import list_employee_tasks
 
@@ -182,6 +183,67 @@ async def list_active_employee_options(
         .order_by(Employee.full_name.asc())
     )
     return list(result.scalars())
+
+
+async def _assignment_counts(
+    session: AsyncSession,
+    employee_id: int,
+) -> tuple[int, int]:
+    task_count = int(
+        (
+            await session.execute(
+                select(func.count(TaskAssignment.task_id)).where(
+                    TaskAssignment.employee_id == employee_id
+                )
+            )
+        ).scalar_one()
+    )
+    project_count = int(
+        (
+            await session.execute(
+                select(func.count(func.distinct(Task.project_id)))
+                .select_from(TaskAssignment)
+                .join(Task, Task.id == TaskAssignment.task_id)
+                .where(TaskAssignment.employee_id == employee_id)
+            )
+        ).scalar_one()
+    )
+    return task_count, project_count
+
+
+async def update_employee_position(
+    session: AsyncSession,
+    employee_id: int,
+    payload: EmployeeUpdate,
+) -> EmployeeRead:
+    """Update the administrator-editable employee position.
+
+    Only the job title / position is editable here. No authorization
+    field exists on the account, so this endpoint cannot grant rights.
+    An empty value clears the position.
+    """
+
+    employee = await session.get(Employee, employee_id)
+
+    if employee is None:
+        raise NotFoundError("Çalışan bulunamadı.")
+
+    employee.role = normalize_role(payload.role)
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+
+    await session.refresh(employee)
+
+    task_count, project_count = await _assignment_counts(
+        session,
+        employee_id,
+    )
+
+    return _to_employee_read(employee, task_count, project_count)
 
 
 async def _employee_report_count(

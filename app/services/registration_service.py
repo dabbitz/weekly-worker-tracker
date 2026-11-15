@@ -17,6 +17,7 @@ def _to_read(
         id=request.id,
         telegram_user_id=request.telegram_user_id,
         requested_full_name=request.requested_full_name,
+        requested_role=request.requested_role,
         employee_id=request.employee_id,
         employee_full_name=employee_full_name,
         status=request.status,
@@ -137,11 +138,18 @@ async def review_registration_request_in_session(
             employee = Employee(
                 telegram_user_id=request.telegram_user_id,
                 full_name=request.requested_full_name,
+                role=request.requested_role,
             )
             session.add(employee)
         else:
             employee.full_name = request.requested_full_name
             employee.is_active = True
+
+            # The position reported with the request wins only when it was
+            # actually provided; an empty value never wipes a position the
+            # administrator already entered.
+            if request.requested_role:
+                employee.role = request.requested_role
 
         await session.flush()
 

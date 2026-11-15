@@ -1769,3 +1769,145 @@ async def test_preview_send_failure_is_reported_without_false_success(
     assert "Bilgi güncellendi" not in texts[0]
     assert all("kaydedildi" not in text.lower() for text in texts)
     assert await count_updates(session) == 0
+
+
+SUPPLIER_DELIVERY_TEXT = (
+    "Switch ve router ekipmanları henüz teslim edilmediği için "
+    "kuruluma başlayamadık. Tedarikçi teslimatın 20 Kasım'da "
+    "yapılacağını söyledi. Ekipmanlar geldikten sonra kuruluma "
+    "devam edeceğiz."
+)
+
+EXPLICIT_COMPLETION_TEXT = (
+    "Kuruluma devam ediyoruz ancak kablolama beklediğimizden uzun "
+    "sürdü. İşi 20 Kasım'da tamamlayacağız."
+)
+
+
+async def test_supplier_delivery_date_is_not_stored_as_task_eta(
+    session,
+):
+    telegram_id = 7101
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    employee_id, task_id, _plan_id = await setup_flow(
+        session,
+        bot,
+        state,
+        telegram_id=telegram_id,
+    )
+
+    handlers.set_extractor(
+        FakeExtractor(
+            make_draft(
+                task_reference_text="Switch ve router kurulumu",
+                status="blocked",
+                completion_percentage=0,
+                blocker="Ekipmanların teslim edilmemiş olması",
+                delay_reason=None,
+                next_step="Ekipmanlar geldikten sonra kuruluma devam",
+                reported_eta_text=None,
+                summary=(
+                    "Ekipman teslim edilmediği için kurulum "
+                    "başlamadı; tedarikçi 20 Kasım'da teslim edecek."
+                ),
+            )
+        )
+    )
+
+    await submit_report(
+        bot,
+        state,
+        telegram_id=telegram_id,
+        text=SUPPLIER_DELIVERY_TEXT,
+        message_id=710,
+    )
+
+    data = await state.get_data()
+
+    # The delivery date must not be normalized as the task ETA.
+    assert data["draft"]["reported_eta_text"] is None
+    assert data["reported_eta_date"] is None
+    assert data["draft"]["status"] == "blocked"
+    assert data["draft"]["blocker"] == (
+        "Ekipmanların teslim edilmemiş olması"
+    )
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.employee_id == employee_id
+    assert update_row.task_id == task_id
+    assert update_row.status == "blocked"
+    assert update_row.reported_eta_text is None
+    assert update_row.reported_eta_date is None
+    assert update_row.blocker == "Ekipmanların teslim edilmemiş olması"
+    assert update_row.delay_reason is None
+    # The supplier date survives only inside its own context.
+    assert "20 Kasım" in (update_row.summary or "")
+
+
+async def test_explicit_task_completion_date_is_still_normalized(
+    session,
+):
+    telegram_id = 7102
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    await setup_flow(session, bot, state, telegram_id=telegram_id)
+
+    handlers.set_extractor(
+        FakeExtractor(
+            make_draft(
+                status="in_progress",
+                completion_percentage=75,
+                blocker=None,
+                delay_reason="Kablolama beklenenden uzun sürdü",
+                reported_eta_text="20 Kasım'da",
+            )
+        )
+    )
+
+    await submit_report(
+        bot,
+        state,
+        telegram_id=telegram_id,
+        text=EXPLICIT_COMPLETION_TEXT,
+        message_id=711,
+    )
+
+    data = await state.get_data()
+
+    assert data["draft"]["status"] == "in_progress"
+    assert data["draft"]["delay_reason"] == (
+        "Kablolama beklenenden uzun sürdü"
+    )
+    assert data["reported_eta_date"] == "2026-11-20"
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.status == "in_progress"
+    assert update_row.completion_percentage == 75
+    assert update_row.delay_reason == "Kablolama beklenenden uzun sürdü"
+    assert update_row.reported_eta_date == date(2026, 11, 20)
+

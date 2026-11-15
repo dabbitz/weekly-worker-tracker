@@ -61,6 +61,10 @@ export interface EmployeeDetail extends Employee {
   projects: ProjectOption[]
 }
 
+export interface EmployeeUpdatePayload {
+  role: string | null
+}
+
 export interface Task {
   id: number
   project_id: number
@@ -131,6 +135,7 @@ export interface RegistrationRequest {
   id: number
   telegram_user_id: number
   requested_full_name: string
+  requested_role: string | null
   employee_id: number | null
   employee_full_name: string | null
   status: RegistrationStatus

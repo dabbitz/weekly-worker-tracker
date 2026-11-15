@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_db, require_admin
 from app.schemas.common import Page
-from app.schemas.employee import EmployeeRead
+from app.schemas.employee import EmployeeRead, EmployeeUpdate
 from app.schemas.employee_detail import EmployeeDetail
 from app.services import employee_query_service
 
@@ -40,6 +40,19 @@ async def employee_detail(
     return await employee_query_service.get_employee_detail(
         session,
         employee_id,
+    )
+
+
+@router.patch("/{employee_id}", response_model=EmployeeRead)
+async def update_employee(
+    employee_id: int,
+    payload: EmployeeUpdate,
+    session: AsyncSession = Depends(get_db),
+) -> EmployeeRead:
+    return await employee_query_service.update_employee_position(
+        session,
+        employee_id,
+        payload,
     )
 
 

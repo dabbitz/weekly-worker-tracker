@@ -100,17 +100,36 @@ STATUS CLASSIFICATION:
 
 COMPLETION PERCENTAGE:
 
-11. completion_percentage represents the overall completion
-    percentage of the entire task at the time of the report.
+11. completion_percentage represents the overall completion percentage
+    of the entire task at the time of the report. It is the progress of
+    the whole task, never the personal contribution share of the
+    employee who writes the message.
 
-12. Extract explicitly stated numerical percentages when
-    they refer to the completed portion of the entire task.
+12. If the employee states a numerical percentage that refers to the
+    completed portion of the entire task, use that number exactly. An
+    explicitly stated percentage always takes priority over any
+    estimate.
 
-13. The presence of a time expression such as "this week"
-    or "today" does NOT automatically mean the percentage
-    represents progress made only during that period.
+13. If no number is stated but the message clearly describes how much
+    of the task is done, infer one approximate percentage that matches
+    that description:
 
-14. Examples:
+    "Daha yeni başladık."        -> completion_percentage = 10
+    "Yarısını tamamladık."       -> completion_percentage = 50
+    "Çoğu bitti."                -> completion_percentage = 75
+    "Neredeyse tamamladık."      -> completion_percentage = 90
+    "İşin tamamını bitirdik."    -> completion_percentage = 100
+
+14. Infer a percentage only when the wording provides enough evidence
+    about the overall progress. If the message does not support a
+    defensible estimate, return null. Never invent a percentage for a
+    vague message and never return a default value.
+
+15. The presence of a time expression such as "this week" or "today"
+    does NOT automatically mean the percentage represents progress made
+    only during that period.
+
+16. Examples of explicit numbers:
 
     "Elektrik tesisatının %70'ini tamamladık."
     -> completion_percentage = 70
@@ -130,89 +149,133 @@ COMPLETION PERCENTAGE:
        unless the overall completion percentage is
        explicitly provided elsewhere.
 
-15. Never estimate, calculate, or invent a percentage.
-
-16. If the meaning of the percentage is genuinely ambiguous,
-    return null rather than guessing.
+17. The value must always stay between 0 and 100.
 
 BLOCKERS AND DELAYS:
 
-17. blocker describes a currently existing obstacle that
-    prevents or limits work from continuing.
+18. Distinguish these situations carefully:
 
-18. delay_reason describes the explicitly reported cause
-    of a delay.
+    blocked:
+    Work cannot continue because of an explicitly stated obstacle or
+    dependency. Example: "Switch ve router ekipmanları teslim
+    edilmediği için kuruluma başlayamıyoruz."
 
-19. Do not invent reasons for delays.
+    delayed:
+    Work can continue, but the planned schedule is slipping, or the
+    employee explicitly reports that the work will finish late.
+    Example: "Kuruluma devam ediyoruz ancak kablolama beklediğimizden
+    uzun sürdü. İşi iki gün geç teslim edeceğiz."
+
+    in_progress:
+    Work continues normally.
+
+19. A reported delay alone must never set the status to blocked. If
+    work is continuing, keep the appropriate working status (usually
+    in_progress) and record the delay separately in delay_reason.
+
+20. Use blocked only when the obstacle actually prevents the work from
+    continuing.
+
+21. blocker describes the currently existing obstacle that prevents or
+    limits work from continuing.
+
+22. delay_reason describes the explicitly reported delay and its stated
+    cause, for example "Kablolama beklenenden uzun sürdü". Record only
+    what the employee actually said; never invent a delay reason.
+
+23. An obstacle and a delay can exist at the same time. When both are
+    reported, fill both blocker and delay_reason.
+
+24. A completed task stays completed. Do not downgrade a finished task
+    to blocked or in_progress because a delay was mentioned.
 
 NEXT STEP:
 
-20. Extract the next_step only when the employee explicitly
+25. Extract the next_step only when the employee explicitly
     states or clearly commits to a future action.
 
-21. Do not invent recommendations or assign responsibilities
+26. Do not invent recommendations or assign responsibilities
     that the employee did not mention.
 
-22. The next_step field must describe the next operational
+27. The next_step field must describe the next operational
     action, not repeat the expected completion date.
 
-23. Keep deadlines and time expressions exclusively in
-    reported_eta_text.
+28. Keep the expected completion time itself in reported_eta_text.
+    A date of another event (delivery, meeting, inspection, visit)
+    may be kept in the summary or the next_step inside its own
+    context, but never as the task ETA.
 
-24. If no concrete next action can be identified,
+29. If no concrete next action can be identified,
     return null.
 
 EXPECTED COMPLETION:
 
-25. Extract the employee's original expected completion
-    expression into reported_eta_text.
+30. Extract into reported_eta_text only a date or duration that the
+    employee explicitly gives for completing the reported task itself.
 
-26. Preserve the original wording and meaning.
-
-27. Examples:
+31. Preserve the original wording and meaning. Examples:
     - "cuma"
     - "cuma gününe kadar"
     - "yarın"
     - "önümüzdeki hafta"
     - "ayın sonunda"
 
-28. Do not convert relative expressions into calendar dates.
+32. The date of another event is NOT the task completion date.
+    Supplier or material deliveries, equipment arrivals, meetings,
+    inspections, controls, visits and similar events are separate
+    events.
 
-29. Do not calculate weekdays or generate ISO dates.
-    The backend will handle date normalization using
+    "İşi 20 Kasım'da tamamlayacağız."
+    -> reported_eta_text = "20 Kasım"
+
+    "Tedarikçi teslimatın 20 Kasım'da yapılacağını söyledi."
+    -> reported_eta_text = null (20 Kasım is a delivery date)
+
+    "Switch ve router ekipmanları henüz teslim edilmediği için
+    kuruluma başlayamadık. Tedarikçi teslimatın 20 Kasım'da
+    yapılacağını söyledi. Ekipmanlar geldikten sonra kuruluma
+    devam edeceğiz."
+    -> status = blocked
+    -> blocker = ekipmanların teslim edilmemiş olması
+    -> delay_reason = null
+    -> reported_eta_text = null
+
+33. Do not convert relative expressions into calendar dates.
+
+34. Do not calculate weekdays or generate ISO dates.
+    The backend normalizes reported_eta_text only, using
     the actual Telegram message timestamp and the
     Europe/Istanbul timezone.
 
-30. If no expected completion time is mentioned,
-    return null.
+35. If no task completion time is mentioned, return null.
 
 SUMMARY:
 
-31. Write a concise, factual summary in Turkish.
+36. Write a concise, factual summary in Turkish.
 
-32. Preserve the important information about progress,
-    obstacles, delays, and expected completion.
+37. Preserve the important information about progress,
+    obstacles, delays, event dates and expected completion.
 
-33. Do not add information that was not present
+38. Do not add information that was not present
     in the employee's message.
 
 OUTPUT:
 
-34. Return only the structured information matching
+39. Return only the structured information matching
     the provided WorkUpdate schema.
 
-35. Do not add database identifiers or additional fields.
+40. Do not add database identifiers or additional fields.
 
-36. Preserve all important conditions, dependencies and
+41. Preserve all important conditions, dependencies and
     qualifications related to the reported work and expected
     completion.
 
-37. For example, if an employee says:
+42. For example, if an employee says:
     "We expect to finish by Friday if the materials arrive tomorrow",
     the summary must preserve both the Friday deadline and
     the condition regarding material delivery.
 
-38. Never remove conditions that affect the expected outcome.
+43. Never remove conditions that affect the expected outcome.
 """
 
 class WorkUpdateExtractor:

@@ -10,6 +10,7 @@ import type {
   DashboardSummary,
   Employee,
   EmployeeDetail,
+  EmployeeUpdatePayload,
   LoginResponse,
   Page,
   Project,
@@ -122,6 +123,16 @@ export const employeesApi = {
 
   get(id: number): Promise<EmployeeDetail> {
     return request<EmployeeDetail>(`/employees/${id}`)
+  },
+
+  update(
+    id: number,
+    payload: EmployeeUpdatePayload,
+  ): Promise<Employee> {
+    return request<Employee>(`/employees/${id}`, {
+      method: 'PATCH',
+      body: payload,
+    })
   },
 
   remove(id: number): Promise<void> {

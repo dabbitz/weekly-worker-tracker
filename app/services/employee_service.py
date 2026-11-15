@@ -10,11 +10,32 @@ from app.services.registration_service import (
     review_registration_request_in_session,
 )
 
+ROLE_MAX_LENGTH = 80
+
+
+def normalize_role(value: str | None) -> str | None:
+    """Normalize a job title / position label.
+
+    The value is a profession label, never an authorization role. Blank
+    input means "not specified" and is stored as NULL.
+    """
+
+    if value is None:
+        return None
+
+    cleaned = " ".join(value.split())
+
+    if not cleaned:
+        return None
+
+    return cleaned[:ROLE_MAX_LENGTH]
+
 
 async def create_registration_request(
     telegram_user_id: int,
     telegram_chat_id: int,
     full_name: str,
+    role: str | None = None,
 ) -> tuple[RegistrationRequest | None, str]:
 
     async with SessionLocal() as session:
@@ -54,6 +75,7 @@ async def create_registration_request(
             telegram_user_id=telegram_user_id,
             telegram_chat_id=telegram_chat_id,
             requested_full_name=full_name,
+            requested_role=normalize_role(role),
             employee_id=employee.id if employee else None,
         )
 

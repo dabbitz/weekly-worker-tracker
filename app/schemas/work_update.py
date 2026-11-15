@@ -33,7 +33,8 @@ class WorkUpdate(BaseModel):
     )
 
     # Overall completion percentage of the entire task.
-    # Not the percentage of work completed during this week.
+    # Not the percentage of work completed during this week and not the
+    # employee's personal contribution share.
 
     completion_percentage: int | None = Field(
         default=None,
@@ -41,11 +42,16 @@ class WorkUpdate(BaseModel):
         le=100,
         description=(
             "The overall completion percentage of the entire task "
-            "at the time of this report. Extract explicitly stated "
-            "percentages such as '70% of the task is completed'. "
-            "A phrase like 'this week' does not automatically mean "
-            "the percentage represents weekly progress. Return null "
-            "only if the percentage is absent or its meaning is ambiguous."
+            "at the time of this report. Use an explicitly stated "
+            "number such as '70% of the task is completed' exactly. "
+            "When no number is given but the message clearly states "
+            "how much of the task is done ('we just started', 'half of "
+            "it is done', 'most of it is done', 'nearly finished', "
+            "'we finished the whole job'), infer one approximate "
+            "percentage between 0 and 100. Return null when the "
+            "message does not support a defensible estimate. A phrase "
+            "like 'this week' does not automatically mean the "
+            "percentage represents weekly progress."
         )
     )
 
@@ -55,7 +61,7 @@ class WorkUpdate(BaseModel):
         default=None,
         description=(
             "An explicitly stated obstacle currently preventing "
-            "the work from progressing."
+            "the work from continuing. A delay alone is not a blocker."
         )
     )
 
@@ -64,8 +70,9 @@ class WorkUpdate(BaseModel):
     delay_reason: str | None = Field(
         default=None,
         description=(
-            "The explicitly stated reason for a delay. "
-            "Return null if no delay reason is provided."
+            "The explicitly stated delay and its stated cause when "
+            "work continues but the schedule is slipping. Return null "
+            "if no delay is reported, and never invent a cause."
         )
     )
 
@@ -84,10 +91,11 @@ class WorkUpdate(BaseModel):
     reported_eta_text: str | None = Field(
         default=None,
         description=(
-            "The original expected completion time expression "
-            "used by the employee, such as 'cuma gününe kadar', "
+            "The original expected completion time expression for "
+            "finishing the task itself, such as 'cuma gününe kadar', "
             "'yarın' or 'önümüzdeki hafta'. Preserve its meaning. "
-            "Do not convert it into a calendar date."
+            "Never use a delivery, material, meeting, inspection or "
+            "visit date here. Do not convert it into a calendar date."
         )
     )
 

@@ -19,3 +19,10 @@ class ReportFlow(StatesGroup):
 
     # The employee is editing one field of the current draft.
     waiting_for_field_edit = State()
+
+
+class RegistrationFlow(StatesGroup):
+    """States of the Telegram self-registration request."""
+
+    # Name and surname were received; waiting for the job title.
+    waiting_for_position = State()
