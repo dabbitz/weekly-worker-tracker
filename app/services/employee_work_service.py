@@ -23,15 +23,20 @@ from app.database.models import (
     TaskUpdate,
     WeeklyTaskPlan,
 )
-from app.schemas.work_update import WorkUpdate
+from app.schemas.work_update import ProgressScope, WorkUpdate
 from app.schemas.weekly_plan import WeeklyPlanStatus
 from app.services.exceptions import (
     ConflictError,
     NotFoundError,
     ValidationError,
 )
+from app.services.progress import compute_overall_progress
 from app.services.task_service import list_employee_tasks
-from app.services.week_utils import istanbul_today, week_contains
+from app.services.week_utils import (
+    istanbul_day_start_utc,
+    istanbul_today,
+    week_contains,
+)
 
 
 @dataclass(frozen=True)
@@ -284,6 +289,50 @@ def _is_duplicate_message_error(exc: IntegrityError) -> bool:
     return "uq_task_updates_telegram_message" in str(original)
 
 
+async def get_progress_baseline(
+    session: AsyncSession,
+    *,
+    task_id: int,
+    week_start_date: date,
+    task_planned_start_date: date | None,
+) -> int | None:
+    """Return the real overall task progress at the start of a week.
+
+    Only an approved earlier ``TaskUpdate`` that actually contains a
+    percentage is used. A previous weekly target is never treated as
+    achieved progress. When no earlier report exists, zero is accepted
+    only for a task that starts in this week. Otherwise the baseline is
+    unknown and no conversion may be made.
+    """
+
+    previous = await session.scalar(
+        select(TaskUpdate.completion_percentage)
+        .where(
+            TaskUpdate.task_id == task_id,
+            TaskUpdate.review_status == "approved",
+            TaskUpdate.completion_percentage.is_not(None),
+            TaskUpdate.received_at
+            < istanbul_day_start_utc(week_start_date),
+        )
+        .order_by(
+            TaskUpdate.received_at.desc(),
+            TaskUpdate.id.desc(),
+        )
+        .limit(1)
+    )
+
+    if previous is not None:
+        return previous
+
+    if (
+        task_planned_start_date is not None
+        and task_planned_start_date >= week_start_date
+    ):
+        return 0
+
+    return None
+
+
 async def create_task_update(
     session: AsyncSession,
     *,
@@ -340,6 +389,8 @@ async def create_task_update(
             "Görev bulunamadı veya bu göreve atanmış değilsiniz."
         )
 
+    plan: WeeklyTaskPlan | None = None
+
     if weekly_plan_id is not None:
         plan = await session.get(WeeklyTaskPlan, weekly_plan_id)
 
@@ -362,6 +413,40 @@ async def create_task_update(
                 "Seçilen haftalık plan bugünü kapsamıyor."
             )
 
+    baseline = None
+    weekly_target = None
+
+    if (
+        draft.progress_scope is ProgressScope.WEEKLY_PLAN
+        and plan is not None
+    ):
+        weekly_target = plan.target_completion_percentage
+
+        task_planned_start_date = await session.scalar(
+            select(Task.planned_start_date).where(Task.id == task_id)
+        )
+
+        baseline = await get_progress_baseline(
+            session,
+            task_id=task_id,
+            week_start_date=plan.week_start_date,
+            task_planned_start_date=task_planned_start_date,
+        )
+
+    completion_percentage = compute_overall_progress(
+        reported=draft.reported_progress_percentage,
+        scope=draft.progress_scope,
+        baseline=baseline,
+        weekly_target=weekly_target,
+    )
+
+    if (
+        completion_percentage is None
+        and draft.progress_scope is ProgressScope.OVERALL_TASK
+    ):
+        # Accept a legacy overall draft that only filled the final field.
+        completion_percentage = draft.completion_percentage
+
     existing_id = await _find_update_by_telegram_message(
         session,
         telegram_chat_id,
@@ -383,7 +468,7 @@ async def create_task_update(
         original_message=original_message,
         task_reference_text=draft.task_reference_text,
         status=draft.status.value,
-        completion_percentage=draft.completion_percentage,
+        completion_percentage=completion_percentage,
         blocker=draft.blocker,
         delay_reason=draft.delay_reason,
         next_step=draft.next_step,

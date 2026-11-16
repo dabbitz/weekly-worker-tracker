@@ -48,7 +48,7 @@ def test_instruction_maps_natural_language_progress(
 ):
     line = instruction_line(phrase)
 
-    assert f"completion_percentage = {percentage}" in line
+    assert f"reported_progress_percentage = {percentage}" in line
 
 
 def test_instruction_keeps_explicit_percentage_first():
@@ -104,6 +104,8 @@ def make_draft(**overrides) -> WorkUpdate:
     data = {
         "task_reference_text": "Kurulum",
         "status": "in_progress",
+        "reported_progress_percentage": None,
+        "progress_scope": "overall_task",
         "completion_percentage": None,
         "blocker": None,
         "delay_reason": None,
@@ -112,6 +114,10 @@ def make_draft(**overrides) -> WorkUpdate:
         "summary": "Kurulum devam ediyor.",
     }
     data.update(overrides)
+    if data.get("progress_scope", "overall_task") == "overall_task":
+        data["reported_progress_percentage"] = data.get(
+            "completion_percentage"
+        )
     return WorkUpdate.model_validate(data)
 
 

@@ -47,6 +47,7 @@ def selection_data(
         "source_message_date": None,
         "original_message": None,
         "draft": None,
+        "progress_baseline": None,
         "reported_eta_date": None,
         "ai_model": None,
         "confirmation_token": None,

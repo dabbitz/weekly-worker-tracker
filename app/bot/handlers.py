@@ -27,6 +27,7 @@ from app.bot import formatting
 from app.bot.drafts import (
     EDITABLE_FIELDS,
     apply_edit,
+    apply_progress_scope,
     clamp_ai_draft,
     draft_from_data,
 )
@@ -42,6 +43,7 @@ from app.services.date_normalizer import normalize_eta_date
 from app.services.employee_work_service import (
     create_task_update,
     get_active_employee_by_telegram_id,
+    get_progress_baseline,
     get_task_context,
     list_my_tasks,
 )
@@ -78,6 +80,45 @@ def _today() -> date:
 
 def _state_is(state: str | None, expected) -> bool:
     return state == expected.state
+
+
+def _extraction_context(context, today: date) -> dict:
+    """Build the task/plan context sent to the AI extractor.
+
+    The scope classifier cannot relate "bu haftaki" work to the plan
+    without the selected task and the approved weekly plan.
+    """
+
+    plan = context.weekly_plan
+
+    return {
+        "task_title": context.title,
+        "project_name": context.project_name,
+        "planned_start_date": (
+            context.planned_start_date.isoformat()
+            if context.planned_start_date is not None
+            else None
+        ),
+        "planned_due_date": (
+            context.planned_due_date.isoformat()
+            if context.planned_due_date is not None
+            else None
+        ),
+        "report_date": today.isoformat(),
+        "plan_conflict": context.plan_conflict,
+        "weekly_plan": (
+            None
+            if plan is None
+            else {
+                "description": plan.target_description,
+                "week_start_date": plan.week_start_date.isoformat(),
+                "week_end_date": plan.week_end_date.isoformat(),
+                "target_completion_percentage": (
+                    plan.target_completion_percentage
+                ),
+            }
+        ),
+    }
 
 
 def _matches_flow(data: dict, user_id: int, chat_id: int) -> bool:
@@ -451,6 +492,26 @@ async def _handle_report_text(
             )
             return
 
+        progress_baseline = None
+
+        if context.weekly_plan is not None:
+            progress_baseline = await get_progress_baseline(
+                session,
+                task_id=context.task_id,
+                week_start_date=(
+                    context.weekly_plan.week_start_date
+                ),
+                task_planned_start_date=(
+                    context.planned_start_date
+                ),
+            )
+
+    weekly_target = (
+        context.weekly_plan.target_completion_percentage
+        if context.weekly_plan is not None
+        else None
+    )
+
     # Refresh the plan snapshot so the preview reflects the current
     # database state, including a newly appearing conflict.
     data["task_title"] = context.title
@@ -462,7 +523,10 @@ async def _handle_report_text(
     await message.answer("Mesajınız analiz ediliyor...")
 
     try:
-        result = await extractor.extract(text)
+        result = await extractor.extract(
+            text,
+            task_context=_extraction_context(context, today),
+        )
 
         if isinstance(result, WorkUpdate):
             draft = result
@@ -470,6 +534,11 @@ async def _handle_report_text(
             draft = WorkUpdate.model_validate(result)
 
         draft = clamp_ai_draft(draft)
+        draft = apply_progress_scope(
+            draft,
+            baseline=progress_baseline,
+            weekly_target=weekly_target,
+        )
 
         if not draft.summary or not draft.summary.strip():
             raise ValueError("AI returned an empty summary.")
@@ -488,6 +557,7 @@ async def _handle_report_text(
                 "source_message_date": message.date.isoformat(),
                 "original_message": text,
                 "draft": draft.model_dump(mode="json"),
+                "progress_baseline": progress_baseline,
                 "reported_eta_date": (
                     eta_result.normalized_date.isoformat()
                     if eta_result.normalized_date is not None

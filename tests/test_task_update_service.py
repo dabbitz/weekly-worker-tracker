@@ -28,6 +28,8 @@ def make_draft(**overrides) -> WorkUpdate:
     data = {
         "task_reference_text": "Elektrik tesisatı",
         "status": "in_progress",
+        "reported_progress_percentage": 70,
+        "progress_scope": "overall_task",
         "completion_percentage": 70,
         "blocker": None,
         "delay_reason": None,
@@ -36,6 +38,10 @@ def make_draft(**overrides) -> WorkUpdate:
         "summary": "İşin %70'i tamamlandı.",
     }
     data.update(overrides)
+    if data.get("progress_scope", "overall_task") == "overall_task":
+        data["reported_progress_percentage"] = data.get(
+            "completion_percentage"
+        )
     return WorkUpdate.model_validate(data)
 
 

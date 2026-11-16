@@ -13,8 +13,9 @@ from datetime import date, datetime
 
 from pydantic import ValidationError as PydanticValidationError
 
-from app.schemas.work_update import WorkStatus, WorkUpdate
+from app.schemas.work_update import ProgressScope, WorkStatus, WorkUpdate
 from app.services.date_normalizer import normalize_eta_date
+from app.services.progress import compute_overall_progress
 
 
 WORK_STATUS_LABELS: dict[WorkStatus, str] = {
@@ -57,7 +58,7 @@ EDITABLE_FIELDS: dict[str, FieldSpec] = {
     ),
     "completion_percentage": FieldSpec(
         key="completion_percentage",
-        label="Genel ilerleme (%)",
+        label="Toplam görev ilerlemesi (%)",
         kind="integer",
     ),
     "blocker": FieldSpec(
@@ -122,6 +123,42 @@ def draft_from_data(data: dict) -> WorkUpdate:
     return WorkUpdate.model_validate(data)
 
 
+def _normalize_progress(data: dict) -> None:
+    """Enforce the meaning of ``completion_percentage``.
+
+    ``completion_percentage`` may only hold the overall task progress.
+    An ``overall_task`` report keeps its reported value. A weekly or
+    personal percentage is kept only in ``reported_progress_percentage``
+    and must not leak into the overall field. The weekly conversion is
+    performed later, when the approved plan and baseline are known.
+    """
+
+    try:
+        scope = ProgressScope(
+            data.get("progress_scope") or ProgressScope.UNCLEAR.value
+        )
+    except ValueError:
+        scope = ProgressScope.UNCLEAR
+
+    reported = data.get("reported_progress_percentage")
+    existing_completion = data.get("completion_percentage")
+
+    if (
+        reported is None
+        and scope is ProgressScope.OVERALL_TASK
+        and existing_completion is not None
+    ):
+        reported = existing_completion
+        data["reported_progress_percentage"] = reported
+
+    data["progress_scope"] = scope.value
+
+    if scope is ProgressScope.OVERALL_TASK:
+        data["completion_percentage"] = reported
+    else:
+        data["completion_percentage"] = None
+
+
 def clamp_ai_draft(draft: WorkUpdate) -> WorkUpdate:
     """Keep AI output inside the DB column limits.
 
@@ -133,6 +170,10 @@ def clamp_ai_draft(draft: WorkUpdate) -> WorkUpdate:
     ``blocked`` with an empty blocker, the status falls back to
     ``in_progress`` and the reported delay is preserved in
     ``delay_reason``. An explicit obstacle keeps ``blocked`` unchanged.
+
+    Finally, a weekly or personal percentage is removed from
+    ``completion_percentage`` so only the whole task progress can ever be
+    persisted there.
     """
 
     data = draft.model_dump(mode="json")
@@ -162,7 +203,37 @@ def clamp_ai_draft(draft: WorkUpdate) -> WorkUpdate:
     ):
         data["status"] = WorkStatus.IN_PROGRESS.value
 
+    _normalize_progress(data)
+
     return WorkUpdate.model_validate(data)
+
+
+def apply_progress_scope(
+    draft: WorkUpdate,
+    *,
+    baseline: int | None = None,
+    weekly_target: int | None = None,
+) -> WorkUpdate:
+    """Replace the AI placeholder with the backend-computed overall value.
+
+    For ``weekly_plan`` progress this applies the deterministic
+    conversion using the real baseline and the approved weekly target.
+    Other non-overall scopes stay without an overall percentage.
+    """
+
+    overall = compute_overall_progress(
+        reported=draft.reported_progress_percentage,
+        scope=draft.progress_scope,
+        baseline=baseline,
+        weekly_target=weekly_target,
+    )
+
+    if overall == draft.completion_percentage:
+        return draft
+
+    return draft.model_copy(
+        update={"completion_percentage": overall}
+    )
 
 
 def _status_value(raw_value: str) -> tuple[str | None, str | None]:
@@ -195,15 +266,16 @@ def _integer_value(raw_value: str) -> tuple[int | None, str | None]:
 
     if not cleaned or not cleaned.isdigit():
         return None, (
-            "Genel ilerleme 0 ile 100 arasında bir tam sayı "
-            "olmalıdır. Temizlemek için - yazın."
+            "Toplam görev ilerlemesi 0 ile 100 arasında bir tam "
+            "sayı olmalıdır. Temizlemek için - yazın."
         )
 
     number = int(cleaned)
 
     if number < 0 or number > 100:
         return None, (
-            "Genel ilerleme 0 ile 100 arasında olmalıdır."
+            "Toplam görev ilerlemesi 0 ile 100 arasında "
+            "olmalıdır."
         )
 
     return number, None
@@ -268,7 +340,10 @@ def apply_edit(
         number, error = _integer_value(value)
         if error is not None:
             return EditOutcome(None, current_eta_date, error)
+        # A manual edit of this field is by definition overall progress.
         data["completion_percentage"] = number
+        data["reported_progress_percentage"] = number
+        data["progress_scope"] = ProgressScope.OVERALL_TASK.value
 
     else:
         text_value, error = _text_value(field, spec, value)

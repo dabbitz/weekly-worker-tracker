@@ -11,6 +11,15 @@ class WorkStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ProgressScope(str, Enum):
+    """What a reported progress percentage refers to."""
+
+    OVERALL_TASK = "overall_task"
+    WEEKLY_PLAN = "weekly_plan"
+    PERSONAL_CONTRIBUTION = "personal_contribution"
+    UNCLEAR = "unclear"
+
+
 class WorkUpdate(BaseModel):
 
     # The task name or description extracted from the message.
@@ -32,26 +41,58 @@ class WorkUpdate(BaseModel):
         )
     )
 
+    # Progress percentage exactly as reported in the message, before any
+    # backend conversion. It may refer to the whole task, the current
+    # weekly plan, or only the employee's personal contribution.
+
+    reported_progress_percentage: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "The progress percentage stated or clearly implied in the "
+            "employee's message. Use an explicitly stated number such as "
+            "'70%' exactly. When no number is given but the message "
+            "clearly describes how much of the reported scope is done "
+            "('we just started', 'half of it is done', 'most of it is "
+            "done', 'nearly finished', 'we finished the whole job'), "
+            "infer one approximate percentage between 0 and 100. Return "
+            "null when the message does not support a defensible "
+            "estimate."
+        )
+    )
+
+    # What the reported percentage refers to.
+
+    progress_scope: ProgressScope = Field(
+        default=ProgressScope.UNCLEAR,
+        description=(
+            "The scope of reported_progress_percentage. Use exactly one "
+            "of: 'overall_task' (total progress of the entire task), "
+            "'weekly_plan' (progress of the work planned for the "
+            "current weekly plan), 'personal_contribution' (progress of "
+            "only the employee's own assigned part) or 'unclear' when "
+            "the message does not provide enough evidence. Consider the "
+            "task title, the weekly plan description, the reporting "
+            "period and the employee's wording. Never guess a scope and "
+            "never default to 'overall_task'."
+        )
+    )
+
     # Overall completion percentage of the entire task.
-    # Not the percentage of work completed during this week and not the
-    # employee's personal contribution share.
+    # Calculated by the backend; the AI must never fill this field.
 
     completion_percentage: int | None = Field(
         default=None,
         ge=0,
         le=100,
         description=(
-            "The overall completion percentage of the entire task "
-            "at the time of this report. Use an explicitly stated "
-            "number such as '70% of the task is completed' exactly. "
-            "When no number is given but the message clearly states "
-            "how much of the task is done ('we just started', 'half of "
-            "it is done', 'most of it is done', 'nearly finished', "
-            "'we finished the whole job'), infer one approximate "
-            "percentage between 0 and 100. Return null when the "
-            "message does not support a defensible estimate. A phrase "
-            "like 'this week' does not automatically mean the "
-            "percentage represents weekly progress."
+            "The overall completion percentage of the entire task at "
+            "the time of this report. This field is calculated by the "
+            "backend after the AI response. Always return null and "
+            "never copy reported_progress_percentage into it. Do not "
+            "convert weekly or personal progress into overall task "
+            "progress yourself."
         )
     )
 

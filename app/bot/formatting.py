@@ -55,6 +55,13 @@ PRIVATE_ONLY = (
     "kullanılabilir."
 )
 
+PROGRESS_SCOPE_LABELS = {
+    "overall_task": "Tüm görev",
+    "weekly_plan": "Bu haftanın planlanan çalışmaları",
+    "personal_contribution": "Çalışanın kişisel katkısı",
+    "unclear": "Belirsiz",
+}
+
 RESTART_HINT = (
     "Rapor akışını /gorevlerim komutuyla yeniden "
     "başlatabilirsiniz."
@@ -215,6 +222,10 @@ def _status_label(value: str) -> str:
         return "Belirsiz"
 
 
+def _scope_label(value: str) -> str:
+    return PROGRESS_SCOPE_LABELS.get(value, "Belirsiz")
+
+
 def _eta_lines(draft: dict, data: dict) -> list[str]:
     eta_text = draft.get("reported_eta_text")
     eta_date_raw = data.get("reported_eta_date")
@@ -254,7 +265,7 @@ def _comparison_lines(data: dict, draft: dict) -> list[str]:
         "",
         "HAFTALIK HEDEF VE GERÇEKLEŞEN İLERLEME",
         f"Hafta sonu için onaylanan hedef: {target_text}",
-        "Çalışanın rapor anındaki genel ilerlemesi: "
+        "Rapor anındaki toplam görev ilerlemesi: "
         f"{completion_text}",
         "",
         "Haftalık hedef, hafta sonunda ulaşılması beklenen "
@@ -302,11 +313,30 @@ def format_preview_text(data: dict) -> str:
         ]
     )
 
+    scope = draft.get("progress_scope") or "unclear"
+    reported = draft.get("reported_progress_percentage")
+
+    if reported is not None:
+        lines.append(f"AI'nın yorumladığı ilerleme: %{reported}")
+
+    lines.append(f"İlerleme kapsamı: {_scope_label(scope)}")
+
     completion = draft.get("completion_percentage")
+
     if completion is not None:
-        lines.append(f"Genel görev ilerlemesi: %{completion}")
+        lines.append(f"Toplam görev ilerlemesi: %{completion}")
+    elif scope == "weekly_plan":
+        lines.append(
+            "Toplam görev ilerlemesi: Hesaplanamadı "
+            "(hafta başındaki gerçek ilerleme bilinmiyor)"
+        )
+    elif scope == "personal_contribution":
+        lines.append(
+            "Toplam görev ilerlemesi: Belirtilmedi "
+            "(rapor yalnızca kişisel katkıyı gösteriyor)"
+        )
     else:
-        lines.append("Genel görev ilerlemesi: Belirtilmedi")
+        lines.append("Toplam görev ilerlemesi: Belirtilmedi")
 
     for label, key in (
         ("Engel", "blocker"),
@@ -425,7 +455,7 @@ def format_field_prompt(spec: FieldSpec) -> str:
 
     if spec.kind == "integer":
         return (
-            "Genel ilerleme yüzdesini 0 ile 100 arasında bir "
+            "Toplam görev ilerlemesini 0 ile 100 arasında bir "
             "tam sayı olarak yazın. Temizlemek için - yazın."
         )
 

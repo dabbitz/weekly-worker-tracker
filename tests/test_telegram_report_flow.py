@@ -173,9 +173,11 @@ class FakeExtractor:
         self.error = error
         self.model = "fake-model"
         self.calls = []
+        self.contexts = []
 
-    async def extract(self, text):
+    async def extract(self, text, *, task_context=None):
         self.calls.append(text)
+        self.contexts.append(task_context)
         if self.error is not None:
             raise self.error
         return self.result
@@ -185,6 +187,8 @@ def make_draft(**overrides) -> WorkUpdate:
     data = {
         "task_reference_text": "Elektrik tesisatı",
         "status": "in_progress",
+        "reported_progress_percentage": 70,
+        "progress_scope": "overall_task",
         "completion_percentage": 70,
         "blocker": None,
         "delay_reason": None,
@@ -193,6 +197,10 @@ def make_draft(**overrides) -> WorkUpdate:
         "summary": "İşin %70'i tamamlandı.",
     }
     data.update(overrides)
+    if data.get("progress_scope", "overall_task") == "overall_task":
+        data["reported_progress_percentage"] = data.get(
+            "completion_percentage"
+        )
     return WorkUpdate.model_validate(data)
 
 
@@ -263,6 +271,8 @@ async def setup_flow(
     project_name: str = "Rapor Projesi",
     with_plan: bool = True,
     plan_percentage: int = 40,
+    plan_description: str = "Kabloları döşe",
+    planned_start_date: date | None = None,
     employee_id: int | None = None,
 ) -> tuple[int, int, int | None]:
     if employee_id is None:
@@ -277,6 +287,7 @@ async def setup_flow(
         title=title,
         project_name=project_name,
         employee_ids=(employee_id,),
+        planned_start_date=planned_start_date,
     )
 
     plan_id = None
@@ -288,7 +299,7 @@ async def setup_flow(
             TODAY,
             WEEK_END,
             percentage=plan_percentage,
-            description="Kabloları döşe",
+            description=plan_description,
         )
 
     callback = FakeCallback(
@@ -1856,6 +1867,98 @@ async def test_supplier_delivery_date_is_not_stored_as_task_eta(
     assert update_row.delay_reason is None
     # The supplier date survives only inside its own context.
     assert "20 Kasım" in (update_row.summary or "")
+
+
+WEEKLY_PREP_TEXT = (
+    "Bu haftaki hazırlıkların yaklaşık %90'ını tamamladık. Mevcut "
+    "altyapıyı inceledik, gerekli ekipman listesini çıkardık ve "
+    "kurulum hazırlıklarını büyük ölçüde bitirdik."
+)
+WEEKLY_PREP_DESCRIPTION = (
+    "Mevcut altyapının incelenmesi, ekipman listesinin çıkarılması "
+    "ve kurulum hazırlıkları"
+)
+
+
+async def test_weekly_plan_scope_is_converted_in_preview_and_record(
+    session,
+):
+    telegram_id = 7301
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    _employee_id, _task_id, plan_id = await setup_flow(
+        session,
+        bot,
+        state,
+        telegram_id=telegram_id,
+        title="Ağ ve Sunucu Altyapısının Kurulumu",
+        plan_description=WEEKLY_PREP_DESCRIPTION,
+        plan_percentage=50,
+        planned_start_date=TODAY,
+    )
+
+    extractor = FakeExtractor(
+        make_draft(
+            task_reference_text="Kurulum hazırlıkları",
+            reported_progress_percentage=90,
+            progress_scope="weekly_plan",
+            completion_percentage=None,
+            summary="Haftalık hazırlıkların çoğu tamamlandı.",
+        )
+    )
+    handlers.set_extractor(extractor)
+
+    report_message = await submit_report(
+        bot,
+        state,
+        telegram_id=telegram_id,
+        text=WEEKLY_PREP_TEXT,
+        message_id=730,
+    )
+
+    data = await state.get_data()
+
+    assert data["draft"]["reported_progress_percentage"] == 90
+    assert data["draft"]["progress_scope"] == "weekly_plan"
+    assert data["draft"]["completion_percentage"] == 45
+
+    preview_text = report_message.answers[-1]["text"]
+    assert "AI'nın yorumladığı ilerleme: %90" in preview_text
+    assert (
+        "İlerleme kapsamı: Bu haftanın planlanan çalışmaları"
+        in preview_text
+    )
+    assert "Toplam görev ilerlemesi: %45" in preview_text
+
+    # The extractor must receive the selected task and plan context.
+    sent_context = extractor.contexts[0]
+    assert sent_context["task_title"] == (
+        "Ağ ve Sunucu Altyapısının Kurulumu"
+    )
+    assert sent_context["weekly_plan"]["description"] == (
+        WEEKLY_PREP_DESCRIPTION
+    )
+    assert sent_context["weekly_plan"][
+        "target_completion_percentage"
+    ] == 50
+    assert sent_context["weekly_plan"]["week_start_date"] == (
+        TODAY.isoformat()
+    )
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.weekly_plan_id == plan_id
+    assert update_row.completion_percentage == 45
 
 
 async def test_explicit_task_completion_date_is_still_normalized(
