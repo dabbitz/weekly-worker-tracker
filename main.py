@@ -13,9 +13,13 @@ from dotenv import load_dotenv
 from app.bot.handlers import (
     register_report_handlers,
     set_extractor,
+    set_transcriber,
 )
 from app.bot.states import RegistrationFlow
-from app.services.ai_service import WorkUpdateExtractor
+from app.services.ai_service import (
+    VoiceTranscriber,
+    WorkUpdateExtractor,
+)
 
 from aiogram.types import (
     CallbackQuery,
@@ -537,7 +541,13 @@ async def main():
         model=GEMINI_MODEL
     )
 
+    transcriber = VoiceTranscriber(
+        api_key=GEMINI_API_KEY,
+        model=GEMINI_MODEL
+    )
+
     set_extractor(extractor)
+    set_transcriber(transcriber)
 
     try:
 
@@ -551,6 +561,7 @@ async def main():
     finally:
 
         await extractor.close()
+        await transcriber.close()
         logging.info("AI service closed.")
 
 

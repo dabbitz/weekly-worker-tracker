@@ -1,8 +1,8 @@
 """Turkish message and keyboard builders for the report flow.
 
 Formatting is kept separate from Telegram handlers so the preview can
-be tested without a bot. The weekly target and the employee's current
-overall progress are always shown with distinct labels.
+be tested without a bot. The compact preview shows the total task
+progress and the scope of the reported progress as distinct values.
 """
 
 from datetime import date
@@ -29,9 +29,8 @@ WEEKDAY_LABELS = (
 )
 
 MAX_LISTED_TASKS = 10
-MAX_ORIGINAL_IN_PREVIEW = 1200
-MAX_SUMMARY_IN_PREVIEW = 900
 MAX_PREVIEW_LENGTH = 3900
+MAX_PREVIEW_FIELD_LENGTH = 160
 
 NO_PLAN_NOTE = (
     "Bu görev için bu hafta onaylanmış bir haftalık hedef "
@@ -66,6 +65,71 @@ RESTART_HINT = (
     "Rapor akışını /gorevlerim komutuyla yeniden "
     "başlatabilirsiniz."
 )
+
+# Voice reports reuse the text pipeline after transcription. These
+# messages only describe the voice-specific steps.
+
+VOICE_REVIEW_GUIDANCE = (
+    "Rapor önizlemesi hazır. Lütfen yukarıdaki "
+    "'Onayla ve kaydet', 'Bilgileri düzenle' veya "
+    "'İptal et' butonlarını kullanın."
+)
+
+VOICE_EDIT_GUIDANCE = (
+    "Rapor bilgilerini düzenlerken lütfen metin gönderin. "
+    "Sesli mesaj yalnızca yeni bir rapor için kullanılabilir. "
+    "Düzenlemeyi iptal etmek için yukarıdaki 'Geri' butonunu "
+    "kullanabilirsiniz."
+)
+
+VOICE_NOT_READY = (
+    "Sesli mesaj servisi henüz hazır değil. Lütfen daha sonra "
+    "tekrar deneyin veya raporunuzu metin olarak gönderin."
+)
+
+VOICE_DOWNLOAD_FAILED = (
+    "Sesli mesajınız indirilemedi. Hiçbir kayıt oluşturulmadı.\n\n"
+    "Lütfen sesli mesajı tekrar gönderin."
+)
+
+VOICE_EMPTY_FILE = (
+    "Sesli mesaj boş görünüyor. Hiçbir kayıt oluşturulmadı.\n\n"
+    "Lütfen raporunuzu tekrar sesli mesaj olarak gönderin."
+)
+
+VOICE_TRANSCRIBING = "Sesli mesajınız yazıya dönüştürülüyor..."
+
+VOICE_TRANSCRIPTION_FAILED = (
+    "Sesli mesajınız yazıya dönüştürülemedi. Hiçbir kayıt "
+    "oluşturulmadı.\n\nLütfen sesli mesajı tekrar gönderin."
+)
+
+VOICE_TRANSCRIPT_EMPTY = (
+    "Sesli mesajınızdan anlaşılır bir konuşma elde edilemedi. "
+    "Hiçbir kayıt oluşturulmadı.\n\nLütfen raporunuzu net bir "
+    "şekilde tekrar sesli mesaj olarak gönderin."
+)
+
+VOICE_ATTACHMENT_UNSUPPORTED = (
+    "Sesli not dışındaki dosya eklerini desteklemiyorum. "
+    "Raporunuzu sesli mesaj veya metin olarak gönderin."
+)
+
+
+def voice_too_long_message(max_seconds: int) -> str:
+    return (
+        "Sesli mesaj çok uzun. En fazla "
+        f"{max_seconds // 60} dakikalık bir sesli mesaj "
+        "gönderebilirsiniz."
+    )
+
+
+def voice_too_large_message(max_bytes: int) -> str:
+    megabytes = max_bytes // (1024 * 1024)
+    return (
+        "Sesli mesaj dosyası çok büyük. En fazla "
+        f"{megabytes} MB boyutunda bir sesli mesaj gönderebilirsiniz."
+    )
 
 
 def format_date(value: date) -> str:
@@ -226,117 +290,77 @@ def _scope_label(value: str) -> str:
     return PROGRESS_SCOPE_LABELS.get(value, "Belirsiz")
 
 
-def _eta_lines(draft: dict, data: dict) -> list[str]:
+def _eta_line(draft: dict, data: dict) -> str | None:
     eta_text = draft.get("reported_eta_text")
-    eta_date_raw = data.get("reported_eta_date")
 
     if not eta_text:
-        return ["Tahmini bitiş: Çalışan tarafından belirtilmedi."]
+        return None
 
-    lines = [f"Çalışanın bitiş ifadesi: {eta_text}"]
+    eta_date_raw = data.get("reported_eta_date")
 
-    if not eta_date_raw:
-        lines.append("Tahmini bitiş tarihi netleştirilmeli.")
-        return lines
+    if eta_date_raw:
+        eta_date = date.fromisoformat(eta_date_raw)
+        return (
+            "Tahmini bitiş: "
+            f"{format_date(eta_date)} ({weekday_label(eta_date)})"
+        )
 
-    eta_date = date.fromisoformat(eta_date_raw)
-    lines.append(
-        "Normalize edilmiş tahmini bitiş: "
-        f"{format_date(eta_date)} ({weekday_label(eta_date)})"
+    return "Tahmini bitiş: " + _shorten(
+        str(eta_text),
+        MAX_PREVIEW_FIELD_LENGTH,
     )
-    return lines
-
-
-def _comparison_lines(data: dict, draft: dict) -> list[str]:
-    plan = data.get("plan")
-
-    if plan is None:
-        return []
-
-    target = plan.get("target_completion_percentage")
-    target_text = "belirtilmedi" if target is None else f"%{target}"
-
-    completion = draft.get("completion_percentage")
-    completion_text = (
-        "belirtilmedi" if completion is None else f"%{completion}"
-    )
-
-    return [
-        "",
-        "HAFTALIK HEDEF VE GERÇEKLEŞEN İLERLEME",
-        f"Hafta sonu için onaylanan hedef: {target_text}",
-        "Rapor anındaki toplam görev ilerlemesi: "
-        f"{completion_text}",
-        "",
-        "Haftalık hedef, hafta sonunda ulaşılması beklenen "
-        "kümülatif görev tamamlanma yüzdesidir. Rapor hafta "
-        "devam ederken alınmışsa iki değer arasındaki fark "
-        "otomatik olarak gecikme sayılmaz.",
-    ]
 
 
 def format_preview_text(data: dict) -> str:
+    """Render the compact Telegram preview of an AI work update.
+
+    The full AI analysis is still stored; this preview intentionally
+    omits the weekly target description, week dates, the original
+    message and the AI summary so the employee can scan the fields that
+    need review.
+    """
+
     draft = data.get("draft") or {}
 
-    original = data.get("original_message") or ""
-
-    if len(original) > MAX_ORIGINAL_IN_PREVIEW:
-        original = (
-            original[:MAX_ORIGINAL_IN_PREVIEW].rstrip()
-            + "\n… (orijinal mesaj önizlemede kısaltıldı)"
-        )
-
-    summary = draft.get("summary") or "Belirtilmedi"
-
-    if len(summary) > MAX_SUMMARY_IN_PREVIEW:
-        summary = (
-            summary[:MAX_SUMMARY_IN_PREVIEW].rstrip()
-            + "… (özet kısaltıldı)"
-        )
-
     lines = [
-        "İŞ GÜNCELLEMESİ ÖNİZLEMESİ",
+        "İŞ GÜNCELLEMESİ",
+        "",
+        f"Görev: {data.get('task_title') or 'Belirtilmedi'}",
+        f"Proje: {data.get('project_name') or 'Belirtilmedi'}",
+        "",
+        "AI ANALİZİ",
         "",
     ]
 
-    lines.extend(_task_header(data))
-    lines.extend(
-        [
-            "",
-            "ÇALIŞANIN MESAJI",
-            original,
-            "",
-            "AI ANALİZİ",
+    work_reference = draft.get("task_reference_text")
+
+    if work_reference:
+        lines.append(
             "İş: "
-            f"{draft.get('task_reference_text') or 'Belirtilmedi'}",
-            "Durum: " + _status_label(draft.get("status", "")),
-        ]
+            + _shorten(
+                str(work_reference),
+                MAX_PREVIEW_FIELD_LENGTH,
+            )
+        )
+
+    lines.append(
+        "Durum: " + _status_label(draft.get("status", ""))
     )
 
     scope = draft.get("progress_scope") or "unclear"
     reported = draft.get("reported_progress_percentage")
 
     if reported is not None:
-        lines.append(f"AI'nın yorumladığı ilerleme: %{reported}")
-
-    lines.append(f"İlerleme kapsamı: {_scope_label(scope)}")
+        lines.append(
+            f"İlerleme: %{reported} ({_scope_label(scope)})"
+        )
 
     completion = draft.get("completion_percentage")
 
     if completion is not None:
         lines.append(f"Toplam görev ilerlemesi: %{completion}")
     elif scope == "weekly_plan":
-        lines.append(
-            "Toplam görev ilerlemesi: Hesaplanamadı "
-            "(hafta başındaki gerçek ilerleme bilinmiyor)"
-        )
-    elif scope == "personal_contribution":
-        lines.append(
-            "Toplam görev ilerlemesi: Belirtilmedi "
-            "(rapor yalnızca kişisel katkıyı gösteriyor)"
-        )
-    else:
-        lines.append("Toplam görev ilerlemesi: Belirtilmedi")
+        lines.append("Toplam görev ilerlemesi: Hesaplanamadı")
 
     for label, key in (
         ("Engel", "blocker"),
@@ -345,18 +369,16 @@ def format_preview_text(data: dict) -> str:
     ):
         value = draft.get(key)
         if value:
-            lines.append(f"{label}: {value}")
+            lines.append(
+                f"{label}: "
+                + _shorten(str(value), MAX_PREVIEW_FIELD_LENGTH)
+            )
 
-    lines.extend(_eta_lines(draft, data))
-    lines.extend(
-        [
-            "",
-            "ÖZET",
-            summary,
-        ]
-    )
+    eta_line = _eta_line(draft, data)
 
-    lines.extend(_comparison_lines(data, draft))
+    if eta_line:
+        lines.append(eta_line)
+
     lines.extend(
         [
             "",

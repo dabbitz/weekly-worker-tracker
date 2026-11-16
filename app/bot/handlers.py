@@ -38,7 +38,7 @@ from app.bot.selection import (
 )
 from app.bot.states import ReportFlow
 from app.database.connection import SessionLocal
-from app.schemas.work_update import WorkUpdate
+from app.schemas.work_update import WorkUpdate, WorkStatus
 from app.services.date_normalizer import normalize_eta_date
 from app.services.employee_work_service import (
     create_task_update,
@@ -59,6 +59,13 @@ logger = logging.getLogger("worktrack.bot")
 router = Router(name="employee_reports")
 
 _extractor = None
+_transcriber = None
+
+# Telegram voice messages are OGG/Opus files. The audio stays in memory
+# and is never written to the database or the file system.
+VOICE_MIME_TYPE = "audio/ogg"
+MAX_VOICE_DURATION_SECONDS = 180
+MAX_VOICE_FILE_SIZE_BYTES = 5 * 1024 * 1024
 
 
 def set_extractor(extractor) -> None:
@@ -70,6 +77,17 @@ def set_extractor(extractor) -> None:
 
 def get_extractor():
     return _extractor
+
+
+def set_transcriber(transcriber) -> None:
+    """Register the shared voice transcriber in the bot process."""
+
+    global _transcriber
+    _transcriber = transcriber
+
+
+def get_transcriber():
+    return _transcriber
 
 
 def _today() -> date:
@@ -403,21 +421,110 @@ async def report_text_handler(
         )
         return
 
-    # No active draft. Never call the AI on random free text anymore;
-    # reports must be tied to a selected task.
+    # No active draft. Keep other FSM flows (registration, edits) intact.
+    if current is not None:
+        return
+
+    await _handle_unprompted_text(message, state)
+
+
+def _has_work_content(draft: WorkUpdate) -> bool:
+    """Return True when the AI draft contains a real work update.
+
+    Greetings and unrelated chat usually come back with ``unknown`` and
+    no progress, blocker, delay, next step or ETA. Such a message must
+    not reach a save preview; the employee is asked for details instead.
+    """
+
+    if draft.status is not WorkStatus.UNKNOWN:
+        return True
+
+    if draft.reported_progress_percentage is not None:
+        return True
+
+    if draft.completion_percentage is not None:
+        return True
+
+    return any(
+        (
+            draft.blocker,
+            draft.delay_reason,
+            draft.next_step,
+            draft.reported_eta_text,
+        )
+    )
+
+
+async def _handle_unprompted_text(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Route a plain private-chat message without a selected task.
+
+    With exactly one assigned task the message is analysed for that
+    task directly, so employees never have to use a command for their
+    regular report. Several tasks require an explicit choice through
+    ``/gorevlerim``; no task means there is nothing to report against.
+    """
+
+    text = (message.text or "").strip()
+
+    if not text:
+        return
+
+    if text.startswith("/"):
+        await message.answer(
+            "Bu komut desteklenmiyor. Kullanılabilir komutlar için "
+            "/help yazabilirsiniz."
+        )
+        return
+
+    today = _today()
+
     async with SessionLocal() as session:
         employee = await get_active_employee_by_telegram_id(
             session,
             message.from_user.id,
         )
 
-    if employee is None:
-        await message.answer(formatting.REGISTER_GUIDANCE)
+        if employee is None:
+            await message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        tasks = await list_my_tasks(session, employee.id, today)
+
+    if not tasks:
+        await message.answer(
+            "Bu hafta için size atanmış bir görev bulunmuyor.\n\n"
+            "Görev ataması yapıldığında buradan rapor "
+            "gönderebilirsiniz."
+        )
         return
 
-    await message.answer(
-        "Rapor göndermek için önce /gorevlerim komutuyla "
-        "bir görev seçin."
+    if len(tasks) > 1:
+        await message.answer(
+            "Birden fazla göreviniz var ve mesajı hangi göreve ait "
+            "olduğu otomatik seçilemiyor.\n\n"
+            "Lütfen /gorevlerim komutuyla rapor göndereceğiniz "
+            "görevi seçin."
+        )
+        return
+
+    context = tasks[0]
+
+    data = selection_data(
+        context,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+    )
+
+    await _analyze_and_preview(
+        message,
+        state,
+        data,
+        context,
+        text,
+        today,
     )
 
 
@@ -452,6 +559,14 @@ async def _handle_report_text(
     if not text.strip():
         await message.answer(
             "Lütfen boş olmayan bir rapor metni gönderin."
+        )
+        return
+
+    if text.strip().startswith("/"):
+        await message.answer(
+            "Komutlar rapor metni olarak işlenmez. Lütfen raporunuzu "
+            "düz metin olarak yazın veya /gorevlerim komutunu "
+            "kullanın."
         )
         return
 
@@ -492,6 +607,41 @@ async def _handle_report_text(
             )
             return
 
+    await _analyze_and_preview(
+        message,
+        state,
+        data,
+        context,
+        text,
+        today,
+    )
+
+
+async def _analyze_and_preview(
+    message: Message,
+    state: FSMContext,
+    data: dict,
+    context,
+    text: str,
+    today: date,
+) -> None:
+    """Run the existing AI report pipeline and render the preview.
+
+    Both an explicitly selected task and a message routed automatically
+    to the employee's single task use this function, so there is only
+    one analysis, draft and confirmation path.
+    """
+
+    extractor = _extractor
+
+    if extractor is None:
+        await message.answer(
+            "Yapay zekâ servisi henüz hazır değil. "
+            "Lütfen daha sonra tekrar deneyin."
+        )
+        return
+
+    async with SessionLocal() as session:
         progress_baseline = None
 
         if context.weekly_plan is not None:
@@ -542,6 +692,15 @@ async def _handle_report_text(
 
         if not draft.summary or not draft.summary.strip():
             raise ValueError("AI returned an empty summary.")
+
+        if not _has_work_content(draft):
+            await message.answer(
+                "Mesajınızdan yeterli bir iş güncellemesi "
+                "çıkaramadım. Hiçbir kayıt oluşturulmadı.\n\n"
+                "Lütfen ne yaptığınızı, işin durumunu ve varsa "
+                "ilerlemeyi kısaca yazın."
+            )
+            return
 
         eta_result = normalize_eta_date(
             draft.reported_eta_text,
@@ -599,6 +758,267 @@ async def _handle_report_text(
             "oluşturulmadı.\n\nLütfen rapor metnini yeniden "
             "gönderin."
         )
+
+
+def _voice_limit_message(voice) -> str | None:
+    """Reject oversized voice messages before any download.
+
+    Telegram reports the duration and the file size in the message
+    metadata, so an unusable recording is rejected without fetching it.
+    """
+
+    duration = getattr(voice, "duration", None)
+
+    if (
+        isinstance(duration, int)
+        and duration > MAX_VOICE_DURATION_SECONDS
+    ):
+        return formatting.voice_too_long_message(
+            MAX_VOICE_DURATION_SECONDS
+        )
+
+    file_size = getattr(voice, "file_size", None)
+
+    if (
+        isinstance(file_size, int)
+        and file_size > MAX_VOICE_FILE_SIZE_BYTES
+    ):
+        return formatting.voice_too_large_message(
+            MAX_VOICE_FILE_SIZE_BYTES
+        )
+
+    return None
+
+
+async def _download_voice(message: Message) -> bytes | None:
+    """Read the voice message into memory; never store it on disk."""
+
+    try:
+        buffer = await message.bot.download(message.voice)
+    except Exception:
+        logger.exception("Could not download the voice message.")
+        await message.answer(formatting.VOICE_DOWNLOAD_FAILED)
+        return None
+
+    if buffer is None:
+        await message.answer(formatting.VOICE_DOWNLOAD_FAILED)
+        return None
+
+    if hasattr(buffer, "getvalue"):
+        audio = buffer.getvalue()
+    else:
+        audio = bytes(buffer)
+
+    if not audio:
+        await message.answer(formatting.VOICE_EMPTY_FILE)
+        return None
+
+    if len(audio) > MAX_VOICE_FILE_SIZE_BYTES:
+        await message.answer(
+            formatting.voice_too_large_message(
+                MAX_VOICE_FILE_SIZE_BYTES
+            )
+        )
+        return None
+
+    return audio
+
+
+async def _transcribe_voice(message: Message) -> str | None:
+    """Transcribe a voice message into the employee's own words.
+
+    The original audio is discarded after the transcript is produced. An
+    empty or failed transcript returns ``None`` so nothing is saved.
+    """
+
+    limit_message = _voice_limit_message(message.voice)
+
+    if limit_message is not None:
+        await message.answer(limit_message)
+        return None
+
+    transcriber = _transcriber
+
+    if transcriber is None:
+        await message.answer(formatting.VOICE_NOT_READY)
+        return None
+
+    audio = await _download_voice(message)
+
+    if audio is None:
+        return None
+
+    await message.answer(formatting.VOICE_TRANSCRIBING)
+
+    try:
+        transcript = await transcriber.transcribe(
+            audio,
+            mime_type=VOICE_MIME_TYPE,
+        )
+    except Exception:
+        # Never log the audio content or the transcript.
+        logger.exception("Voice transcription failed.")
+        await message.answer(formatting.VOICE_TRANSCRIPTION_FAILED)
+        return None
+
+    transcript = (transcript or "").strip()
+
+    if not transcript:
+        await message.answer(formatting.VOICE_TRANSCRIPT_EMPTY)
+        return None
+
+    return transcript
+
+
+async def _transcribe_and_preview(
+    message: Message,
+    state: FSMContext,
+    data: dict,
+    context,
+    today: date,
+) -> None:
+    """Feed a voice transcript into the existing report pipeline.
+
+    After transcription the text path is used unchanged, so the task
+    context, weekly plan, scope conversion, ETA normalization, preview
+    and confirmation all behave exactly like a typed report.
+    """
+
+    transcript = await _transcribe_voice(message)
+
+    if transcript is None:
+        return
+
+    await _analyze_and_preview(
+        message,
+        state,
+        data,
+        context,
+        transcript,
+        today,
+    )
+
+
+async def _handle_report_voice(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+
+    if not data or data.get("task_id") is None:
+        await state.clear()
+        await message.answer(
+            "Rapor akışı bulunamadı. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    if not _matches_flow(
+        data,
+        message.from_user.id,
+        message.chat.id,
+    ):
+        await state.clear()
+        await message.answer(
+            "Bu rapor akışı size ait değil. "
+            + formatting.RESTART_HINT
+        )
+        return
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            message.from_user.id,
+        )
+
+        if employee is None:
+            await state.clear()
+            await message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        try:
+            context = await get_task_context(
+                session,
+                employee.id,
+                data["task_id"],
+                today,
+            )
+        except NotFoundError:
+            await state.clear()
+            await message.answer(
+                "Görev atamanız bulunamadı veya kaldırıldı. "
+                + formatting.RESTART_HINT
+            )
+            return
+
+    await _transcribe_and_preview(
+        message,
+        state,
+        data,
+        context,
+        today,
+    )
+
+
+async def _handle_unprompted_voice(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Route a voice message sent without a selected task.
+
+    The same rules as plain text apply: a single assigned task is chosen
+    automatically, several tasks require ``/gorevlerim``, and no task
+    means there is nothing to report against.
+    """
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            message.from_user.id,
+        )
+
+        if employee is None:
+            await message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        tasks = await list_my_tasks(session, employee.id, today)
+
+    if not tasks:
+        await message.answer(
+            "Bu hafta için size atanmış bir görev bulunmuyor.\n\n"
+            "Görev ataması yapıldığında buradan rapor "
+            "gönderebilirsiniz."
+        )
+        return
+
+    if len(tasks) > 1:
+        await message.answer(
+            "Birden fazla göreviniz var ve sesli mesajın hangi göreve "
+            "ait olduğu otomatik seçilemiyor.\n\n"
+            "Lütfen /gorevlerim komutuyla rapor göndereceğiniz "
+            "görevi seçin."
+        )
+        return
+
+    context = tasks[0]
+
+    data = selection_data(
+        context,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+    )
+
+    await _transcribe_and_preview(
+        message,
+        state,
+        data,
+        context,
+        today,
+    )
 
 
 async def _handle_field_edit_text(
@@ -1221,28 +1641,61 @@ async def confirm_handler(
     await callback.answer("Rapor kaydedildi.")
 
 
+@router.message(F.voice)
+async def report_voice_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Accept a voice note exactly where a text report is accepted."""
+
+    if message.from_user is None:
+        return
+
+    if message.chat.type != "private":
+        await message.answer(formatting.PRIVATE_ONLY)
+        return
+
+    current = await state.get_state()
+
+    if _state_is(current, ReportFlow.waiting_for_report):
+        await _handle_report_voice(message, state)
+        return
+
+    if _state_is(current, ReportFlow.waiting_for_field_edit):
+        # Field edits stay text-only; the running edit flow is untouched.
+        await message.answer(formatting.VOICE_EDIT_GUIDANCE)
+        return
+
+    if _state_is(current, ReportFlow.reviewing):
+        await message.answer(formatting.VOICE_REVIEW_GUIDANCE)
+        return
+
+    # Registration and any other FSM flow must not be interrupted.
+    if current is not None:
+        return
+
+    await _handle_unprompted_voice(message, state)
+
+
 @router.message()
 async def unsupported_message_handler(
     message: Message,
     state: FSMContext,
 ) -> None:
     if (
-        getattr(message, "voice", None) is not None
-        or getattr(message, "audio", None) is not None
+        getattr(message, "audio", None) is not None
         or getattr(message, "video_note", None) is not None
     ):
-        await message.answer(
-            "Sesli raporlama henüz etkin değil; şimdilik "
-            "metin mesajı gönderebilirsiniz."
-        )
+        await message.answer(formatting.VOICE_ATTACHMENT_UNSUPPORTED)
         return
 
     if message.chat.type != "private":
         return
 
     await message.answer(
-        "Şimdilik yalnızca metin mesajlarını destekliyorum. "
-        "Rapor göndermek için /gorevlerim komutunu kullanın."
+        "Şimdilik yalnızca metin ve sesli mesajları "
+        "destekliyorum. Rapor göndermek için /gorevlerim "
+        "komutunu kullanın."
     )
 
 

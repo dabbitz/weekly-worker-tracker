@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 
 import pytest
 from sqlalchemy import delete, func, select, update
@@ -9,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from app.bot import formatting, handlers
 from app.bot.drafts import apply_edit, draft_to_data
-from app.bot.states import ReportFlow
+from app.bot.states import RegistrationFlow, ReportFlow
 from app.database.models import (
     Employee,
     TaskAssignment,
@@ -31,6 +32,10 @@ REPORT_TEXT = (
     "Elektrik tesisatının %70'ini tamamladım. Pano bağlantıları "
     "kaldı, cuma gününe kadar bitecek."
 )
+VOICE_TRANSCRIPT = (
+    "Elektrik tesisatının yüzde yetmişini tamamladım. Pano "
+    "bağlantıları kaldı, cuma gününe kadar bitecek."
+)
 REFERENCE_DATETIME = datetime(
     2026,
     11,
@@ -47,11 +52,20 @@ class FakeBot:
         self.sent = []
         self.keyboard_clears = []
         self.answer_failures = 0
+        self.downloads = []
+        self.download_bytes = b"OggS-fake-voice-data"
+        self.download_error = None
         self._next_id = 1000
 
     def next_message_id(self) -> int:
         self._next_id += 1
         return self._next_id
+
+    async def download(self, file, destination=None, **kwargs):
+        self.downloads.append(file)
+        if self.download_error is not None:
+            raise self.download_error
+        return BytesIO(self.download_bytes)
 
     async def edit_message_text(self, **kwargs):
         self.edits.append(kwargs)
@@ -183,6 +197,63 @@ class FakeExtractor:
         return self.result
 
 
+class FakeVoice:
+    def __init__(
+        self,
+        *,
+        file_id: str = "voice-file-1",
+        duration: int = 15,
+        file_size: int = 2048,
+        mime_type: str = "audio/ogg",
+    ):
+        self.file_id = file_id
+        self.file_unique_id = f"unique-{file_id}"
+        self.duration = duration
+        self.file_size = file_size
+        self.mime_type = mime_type
+
+
+class FakeTranscriber:
+    def __init__(self, transcript=VOICE_TRANSCRIPT, error=None):
+        self.transcript = transcript
+        self.error = error
+        self.calls = []
+
+    async def transcribe(self, audio, *, mime_type="audio/ogg"):
+        self.calls.append(
+            {"audio": audio, "mime_type": mime_type}
+        )
+        if self.error is not None:
+            raise self.error
+        return self.transcript
+
+
+def make_voice_message(
+    bot,
+    *,
+    chat_id: int,
+    user_id: int,
+    message_id: int = 750,
+    date_value: datetime | None = None,
+    chat_type: str = "private",
+    duration: int = 15,
+    file_size: int = 2048,
+) -> FakeMessage:
+    message = FakeMessage(
+        bot=bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        message_id=message_id,
+        date_value=date_value,
+        chat_type=chat_type,
+    )
+    message.voice = FakeVoice(
+        duration=duration,
+        file_size=file_size,
+    )
+    return message
+
+
 def make_draft(**overrides) -> WorkUpdate:
     data = {
         "task_reference_text": "Elektrik tesisatı",
@@ -259,6 +330,7 @@ def bot_session(database, monkeypatch):
     )
     yield
     handlers.set_extractor(None)
+    handlers.set_transcriber(None)
 
 
 async def setup_flow(
@@ -689,7 +761,7 @@ async def test_unassigned_task_callback_is_rejected(session):
     assert await state.get_state() is None
 
 
-async def test_free_text_only_processed_in_report_state(session):
+async def test_free_text_without_task_is_not_analyzed(session):
     telegram_id = 7010
     employee_id = await seed_employee(
         session,
@@ -710,20 +782,24 @@ async def test_free_text_only_processed_in_report_state(session):
     )
     await handlers.report_text_handler(message, state)
 
-    assert "/gorevlerim" in message.answers[-1]["text"]
+    assert "atanmış bir görev bulunmuyor" in (
+        message.answers[-1]["text"]
+    )
     assert extractor.calls == []
 
-    voice_message = FakeMessage(
+    audio_message = FakeMessage(
         bot=bot,
         chat_id=telegram_id,
         user_id=telegram_id,
     )
-    voice_message.voice = object()
+    audio_message.audio = object()
     await handlers.unsupported_message_handler(
-        voice_message,
+        audio_message,
         state,
     )
-    assert "Sesli raporlama" in voice_message.answers[-1]["text"]
+    assert formatting.VOICE_ATTACHMENT_UNSUPPORTED in (
+        audio_message.answers[-1]["text"]
+    )
 
     await setup_flow(
         session,
@@ -752,7 +828,7 @@ async def test_free_text_only_processed_in_report_state(session):
     )
 
     assert extractor.calls == [REPORT_TEXT]
-    assert "ÖNİZLEMESİ" in report_message.answers[-1]["text"]
+    assert "İŞ GÜNCELLEMESİ" in report_message.answers[-1]["text"]
 
     # A lost FSM draft must ask the employee to restart.
     await state.set_state(ReportFlow.waiting_for_report)
@@ -796,12 +872,16 @@ async def test_ai_preview_is_not_persisted(session):
     assert data["draft"]["completion_percentage"] == 70
     assert data["reported_eta_date"] == EXPECTED_ETA.isoformat()
 
-    assert "ÇALIŞANIN MESAJI" in preview_text
-    assert REPORT_TEXT in preview_text
+    assert preview_text.startswith("İŞ GÜNCELLEMESİ")
     assert "AI ANALİZİ" in preview_text
-    assert "HAFTALIK HEDEF VE GERÇEKLEŞEN İLERLEME" in preview_text
-    assert "%40" in preview_text
-    assert "%70" in preview_text
+    assert "İş: Elektrik tesisatı" in preview_text
+    assert "Durum: Devam ediyor" in preview_text
+    assert "İlerleme: %70 (Tüm görev)" in preview_text
+    assert "Toplam görev ilerlemesi: %70" in preview_text
+    # The preview stays compact: no original message, plan text or summary.
+    assert REPORT_TEXT not in preview_text
+    assert "Kabloları döşe" not in preview_text
+    assert "İşin %70'i tamamlandı." not in preview_text
 
     assert await count_updates(session) == 0
 
@@ -1031,7 +1111,10 @@ async def test_other_fields_edit_and_preview_refresh(session):
 
     data = await state.get_data()
     assert data["draft"]["summary"] == "Güncellenmiş özet."
-    assert "Güncellenmiş özet." in summary_message.answers[-1]["text"]
+    assert (
+        "Güncellenmiş özet."
+        not in summary_message.answers[-1]["text"]
+    )
     # Editing fields must not replace the original source message id.
     assert data["source_message_id"] == 500
 
@@ -1591,8 +1674,8 @@ async def test_eta_edit_sends_new_preview_using_source_timestamp(session):
     source_date = data["source_message_date"]
 
     initial_preview = report_message.answers[-1]["text"]
-    assert "Çalışanın bitiş ifadesi: 16 Kasım Pazartesi" in initial_preview
-    assert "16.11.2026 (pazartesi)" in initial_preview
+    assert "Tahmini bitiş: 16.11.2026 (pazartesi)" in initial_preview
+    assert "Çalışanın bitiş ifadesi" not in initial_preview
 
     await open_field_edit(bot, state, telegram_id, "reported_eta_text")
 
@@ -1613,11 +1696,8 @@ async def test_eta_edit_sends_new_preview_using_source_timestamp(session):
     assert len(edit_message.answers) == 1
 
     updated_preview = edit_message.answers[-1]["text"]
-    assert "Çalışanın bitiş ifadesi: cuma gününe kadar" in updated_preview
-    assert (
-        "Normalize edilmiş tahmini bitiş: 20.11.2026 (cuma)"
-        in updated_preview
-    )
+    assert "Tahmini bitiş: 20.11.2026 (cuma)" in updated_preview
+    assert "Çalışanın bitiş ifadesi" not in updated_preview
     assert "Bilgi güncellendi" not in updated_preview
 
     data = await state.get_data()
@@ -1924,9 +2004,8 @@ async def test_weekly_plan_scope_is_converted_in_preview_and_record(
     assert data["draft"]["completion_percentage"] == 45
 
     preview_text = report_message.answers[-1]["text"]
-    assert "AI'nın yorumladığı ilerleme: %90" in preview_text
     assert (
-        "İlerleme kapsamı: Bu haftanın planlanan çalışmaları"
+        "İlerleme: %90 (Bu haftanın planlanan çalışmaları)"
         in preview_text
     )
     assert "Toplam görev ilerlemesi: %45" in preview_text
@@ -2014,3 +2093,617 @@ async def test_explicit_task_completion_date_is_still_normalized(
     assert update_row.delay_reason == "Kablolama beklenenden uzun sürdü"
     assert update_row.reported_eta_date == date(2026, 11, 20)
 
+
+async def test_plain_private_message_auto_reports_single_task(session):
+    telegram_id = 7401
+    employee_id = await seed_employee(
+        session,
+        "Tek Görevli Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    _, task_id = await seed_task(
+        session,
+        title="Elektrik tesisatı",
+        project_name="Otomatik Rapor Projesi",
+        employee_ids=(employee_id,),
+    )
+    plan_id = await seed_plan(
+        session,
+        task_id,
+        TODAY,
+        WEEK_END,
+        percentage=40,
+        description="Kabloları döşe",
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=740,
+    )
+    await handlers.report_text_handler(message, state)
+
+    assert extractor.calls == [REPORT_TEXT]
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    data = await state.get_data()
+    assert data["task_id"] == task_id
+    assert data["source_message_id"] == 740
+    assert data["original_message"] == REPORT_TEXT
+
+    preview_text = message.answers[-1]["text"]
+    assert preview_text.startswith("İŞ GÜNCELLEMESİ")
+    assert "Görev: Elektrik tesisatı" in preview_text
+    assert "Proje: Otomatik Rapor Projesi" in preview_text
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+    assert await state.get_state() is None
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.task_id == task_id
+    assert update_row.weekly_plan_id == plan_id
+    assert update_row.telegram_message_id == 740
+    assert update_row.original_message == REPORT_TEXT
+
+
+async def test_plain_message_with_multiple_tasks_requires_choice(session):
+    telegram_id = 7402
+    employee_id = await seed_employee(
+        session,
+        "Çok Görevli Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=741,
+    )
+    await handlers.report_text_handler(message, state)
+
+    assert "/gorevlerim" in message.answers[-1]["text"]
+    assert extractor.calls == []
+    assert await state.get_state() is None
+    assert await count_updates(session) == 0
+
+
+async def test_plain_greeting_is_not_previewed_or_saved(session):
+    telegram_id = 7403
+    employee_id = await seed_employee(
+        session,
+        "Selam Veren Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Elektrik tesisatı",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    handlers.set_extractor(
+        FakeExtractor(
+            make_draft(
+                task_reference_text=None,
+                status="unknown",
+                reported_progress_percentage=None,
+                progress_scope="unclear",
+                completion_percentage=None,
+                blocker=None,
+                delay_reason=None,
+                next_step=None,
+                reported_eta_text=None,
+                summary="Kullanıcı selam verdi.",
+            )
+        )
+    )
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text="Merhaba, nasılsınız?",
+        message_id=742,
+    )
+    await handlers.report_text_handler(message, state)
+
+    assert "yeterli bir iş güncellemesi" in message.answers[-1]["text"]
+    assert await state.get_state() is None
+    assert await count_updates(session) == 0
+
+
+
+# ---------------------------------------------------------------------------
+# Voice reports
+# ---------------------------------------------------------------------------
+
+
+async def test_voice_message_auto_reports_single_task(session):
+    telegram_id = 7501
+    employee_id = await seed_employee(
+        session,
+        "Sesli Tek Görevli Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    _, task_id = await seed_task(
+        session,
+        title="Elektrik tesisatı",
+        project_name="Sesli Rapor Projesi",
+        employee_ids=(employee_id,),
+    )
+    plan_id = await seed_plan(
+        session,
+        task_id,
+        TODAY,
+        WEEK_END,
+        percentage=40,
+        description="Kabloları döşe",
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    transcriber = FakeTranscriber()
+    extractor = FakeExtractor(make_draft())
+    handlers.set_transcriber(transcriber)
+    handlers.set_extractor(extractor)
+
+    message = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=751,
+    )
+    await handlers.report_voice_handler(message, state)
+
+    # The voice note was downloaded once and sent to the transcriber as
+    # Telegram's audio/ogg payload, without touching the file system.
+    assert bot.downloads == [message.voice]
+    assert len(transcriber.calls) == 1
+    assert transcriber.calls[0]["audio"] == bot.download_bytes
+    assert transcriber.calls[0]["mime_type"] == "audio/ogg"
+
+    # The transcript is the message handed to the existing extractor.
+    assert extractor.calls == [VOICE_TRANSCRIPT]
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    data = await state.get_data()
+    assert data["task_id"] == task_id
+    assert data["source_message_id"] == 751
+    assert data["original_message"] == VOICE_TRANSCRIPT
+
+    preview_text = message.answers[-1]["text"]
+    assert preview_text.startswith("İŞ GÜNCELLEMESİ")
+    assert "Görev: Elektrik tesisatı" in preview_text
+    assert any(
+        formatting.VOICE_TRANSCRIBING in answer["text"]
+        for answer in message.answers
+    )
+    assert await count_updates(session) == 0
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+        message_id=901,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+    assert await state.get_state() is None
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.task_id == task_id
+    assert update_row.weekly_plan_id == plan_id
+    assert update_row.telegram_message_id == 751
+    assert update_row.original_message == VOICE_TRANSCRIPT
+    assert update_row.completion_percentage == 70
+
+
+async def test_voice_message_with_multiple_tasks_requires_choice(session):
+    telegram_id = 7502
+    employee_id = await seed_employee(
+        session,
+        "Sesli Çok Görevli Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    transcriber = FakeTranscriber()
+    extractor = FakeExtractor(make_draft())
+    handlers.set_transcriber(transcriber)
+    handlers.set_extractor(extractor)
+
+    message = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=752,
+    )
+    await handlers.report_voice_handler(message, state)
+
+    assert "/gorevlerim" in message.answers[-1]["text"]
+    assert transcriber.calls == []
+    assert extractor.calls == []
+    assert await state.get_state() is None
+    assert await count_updates(session) == 0
+
+
+async def test_voice_transcript_is_analyzed_with_selected_task_context(
+    session,
+):
+    telegram_id = 7503
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    _employee_id, task_id, _plan_id = await setup_flow(
+        session,
+        bot,
+        state,
+        telegram_id=telegram_id,
+        title="Elektrik tesisatı",
+        plan_description="Kabloları döşe",
+        plan_percentage=40,
+    )
+
+    transcriber = FakeTranscriber()
+    extractor = FakeExtractor(make_draft())
+    handlers.set_transcriber(transcriber)
+    handlers.set_extractor(extractor)
+
+    message = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=753,
+    )
+    await handlers.report_voice_handler(message, state)
+
+    assert extractor.calls == [VOICE_TRANSCRIPT]
+
+    sent_context = extractor.contexts[0]
+    assert sent_context["task_title"] == "Elektrik tesisatı"
+    assert sent_context["report_date"] == TODAY.isoformat()
+    assert sent_context["weekly_plan"]["description"] == (
+        "Kabloları döşe"
+    )
+    assert sent_context["weekly_plan"][
+        "target_completion_percentage"
+    ] == 40
+
+    data = await state.get_data()
+    assert data["task_id"] == task_id
+    assert data["source_message_id"] == 753
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+
+async def test_voice_confirmation_keeps_source_message_id_and_date(
+    session,
+):
+    telegram_id = 7504
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+
+    await setup_flow(session, bot, state, telegram_id=telegram_id)
+
+    handlers.set_transcriber(FakeTranscriber())
+    handlers.set_extractor(FakeExtractor(make_draft()))
+
+    # The voice note is recorded on Monday 16.11.2026, so "cuma"
+    # resolves to Friday 20.11.2026.
+    message = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=754,
+        date_value=REFERENCE_DATETIME,
+    )
+    await handlers.report_voice_handler(message, state)
+
+    data = await state.get_data()
+    assert data["source_message_id"] == 754
+    assert data["source_message_date"] == (
+        REFERENCE_DATETIME.isoformat()
+    )
+    assert data["reported_eta_date"] == EXPECTED_ETA.isoformat()
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+        message_id=902,
+    )
+    # The employee may confirm on a later day; the ETA must still be
+    # normalized from the voice note's own timestamp.
+    confirm.message.date = datetime(
+        2026,
+        11,
+        30,
+        9,
+        0,
+        tzinfo=timezone.utc,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.telegram_message_id == 754
+    assert update_row.telegram_message_id != 902
+    assert update_row.reported_eta_date == EXPECTED_ETA
+    assert update_row.original_message == VOICE_TRANSCRIPT
+
+
+async def test_empty_or_failed_voice_is_not_saved(session):
+    telegram_id = 7505
+    employee_id = await seed_employee(
+        session,
+        "Sesli Hatalı Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Elektrik tesisatı",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    handlers.set_transcriber(FakeTranscriber(transcript="   "))
+    empty = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=755,
+    )
+    await handlers.report_voice_handler(empty, state)
+
+    assert formatting.VOICE_TRANSCRIPT_EMPTY in (
+        empty.answers[-1]["text"]
+    )
+
+    handlers.set_transcriber(
+        FakeTranscriber(error=RuntimeError("asr down"))
+    )
+    failed = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=756,
+    )
+    await handlers.report_voice_handler(failed, state)
+
+    assert formatting.VOICE_TRANSCRIPTION_FAILED in (
+        failed.answers[-1]["text"]
+    )
+
+    transcriber = FakeTranscriber()
+    handlers.set_transcriber(transcriber)
+
+    bot.download_error = RuntimeError("telegram down")
+    download_failed = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=757,
+    )
+    await handlers.report_voice_handler(download_failed, state)
+
+    assert formatting.VOICE_DOWNLOAD_FAILED in (
+        download_failed.answers[-1]["text"]
+    )
+
+    bot.download_error = None
+    bot.download_bytes = b""
+    empty_file = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=758,
+    )
+    await handlers.report_voice_handler(empty_file, state)
+
+    assert formatting.VOICE_EMPTY_FILE in (
+        empty_file.answers[-1]["text"]
+    )
+
+    # Oversized recordings are rejected before any download attempt.
+    too_long = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=759,
+        duration=handlers.MAX_VOICE_DURATION_SECONDS + 1,
+    )
+    await handlers.report_voice_handler(too_long, state)
+
+    assert "çok uzun" in too_long.answers[-1]["text"]
+    assert transcriber.calls == []
+    assert extractor.calls == []
+    assert await state.get_state() is None
+    assert await count_updates(session) == 0
+
+    # In an explicit task flow a failed transcription keeps the state so
+    # the employee can simply resend the voice note.
+    await setup_flow(
+        session,
+        bot,
+        state,
+        telegram_id=telegram_id,
+        employee_id=employee_id,
+    )
+    handlers.set_transcriber(
+        FakeTranscriber(error=RuntimeError("asr down"))
+    )
+    bot.download_bytes = b"OggS-fake-voice-data"
+
+    retry = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=764,
+    )
+    await handlers.report_voice_handler(retry, state)
+
+    assert formatting.VOICE_TRANSCRIPTION_FAILED in (
+        retry.answers[-1]["text"]
+    )
+    assert await state.get_state() == (
+        ReportFlow.waiting_for_report.state
+    )
+    assert await count_updates(session) == 0
+
+
+async def test_voice_does_not_interrupt_active_fsm_flows(session):
+    telegram_id = 7506
+    employee_id = await seed_employee(
+        session,
+        "Akış Çalışanı",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Elektrik tesisatı",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    transcriber = FakeTranscriber()
+    extractor = FakeExtractor(make_draft())
+    handlers.set_transcriber(transcriber)
+    handlers.set_extractor(extractor)
+
+    # A voice note must not consume the registration FSM input.
+    await state.set_state(RegistrationFlow.waiting_for_position)
+    registration_voice = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=760,
+    )
+    await handlers.report_voice_handler(registration_voice, state)
+
+    assert registration_voice.answers == []
+    assert await state.get_state() == (
+        RegistrationFlow.waiting_for_position.state
+    )
+
+    await setup_flow(
+        session,
+        bot,
+        state,
+        telegram_id=telegram_id,
+        employee_id=employee_id,
+    )
+
+    # Field edits stay text-only and keep their current step.
+    data = await state.get_data()
+    data["field_to_edit"] = "blocker"
+    await state.set_data(data)
+    await state.set_state(ReportFlow.waiting_for_field_edit)
+
+    edit_voice = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=761,
+    )
+    await handlers.report_voice_handler(edit_voice, state)
+
+    assert formatting.VOICE_EDIT_GUIDANCE in (
+        edit_voice.answers[-1]["text"]
+    )
+    assert await state.get_state() == (
+        ReportFlow.waiting_for_field_edit.state
+    )
+    assert (await state.get_data())["field_to_edit"] == "blocker"
+
+    # An existing preview keeps its confirmation buttons.
+    await state.set_state(ReportFlow.reviewing)
+
+    review_voice = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=762,
+    )
+    await handlers.report_voice_handler(review_voice, state)
+
+    assert formatting.VOICE_REVIEW_GUIDANCE in (
+        review_voice.answers[-1]["text"]
+    )
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    # Group chats are rejected without touching the state.
+    group_voice = make_voice_message(
+        bot,
+        chat_id=-100123,
+        user_id=telegram_id,
+        message_id=763,
+        chat_type="group",
+    )
+    await handlers.report_voice_handler(group_voice, state)
+
+    assert formatting.PRIVATE_ONLY in (
+        group_voice.answers[-1]["text"]
+    )
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    assert transcriber.calls == []
+    assert extractor.calls == []
+    assert await count_updates(session) == 0

@@ -1,15 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
+  ChevronDown,
   Database,
   FolderKanban,
   History,
-  Lightbulb,
-  ListChecks,
   Printer,
   RotateCcw,
   ShieldCheck,
-  Siren,
   Sparkles,
   Trash2,
   Users,
@@ -29,7 +27,6 @@ import type {
   NarrativeBlock,
   NarrativeSegment,
   WeeklyDataQualityItem,
-  WeeklyInterventionCandidate,
   WeeklyReportDetail,
   WeeklyReportStatus,
   WeeklyTaskSnapshot,
@@ -44,10 +41,18 @@ import { ErrorState } from '../components/ui/ErrorState'
 import { LoadingState } from '../components/ui/LoadingState'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useToast } from '../components/ui/Toast'
+import { NarrativeText } from '../components/weekly-reports/NarrativeText'
+import { WeeklyReportPrintSummary } from '../components/weekly-reports/WeeklyReportPrintSummary'
 import {
-  NarrativeText,
-  SourceChips,
-} from '../components/weekly-reports/NarrativeText'
+  buildReferenceRegistry,
+  codesForTokens,
+  comparePriority,
+  resolveReference,
+  ruleActionSuggestions,
+  sortTasksByRisk,
+  taskRisk,
+  type ReferenceRegistry,
+} from '../components/weekly-reports/reportHelpers'
 
 const statusMeta: Record<
   WeeklyReportStatus,
@@ -67,6 +72,12 @@ const priorityMeta: Record<
   low: { label: 'Düşük öncelik', tone: 'neutral' },
 }
 
+const riskBorder: Record<InterventionPriority, string> = {
+  high: 'border-l-red-400',
+  medium: 'border-l-amber-400',
+  low: 'border-l-slate-300',
+}
+
 const dataQualityLabels: Record<string, string> = {
   TASK_WITHOUT_REPORT: 'Rapor gönderilmedi',
   PLAN_CONFLICT: 'Haftalık plan çakışması',
@@ -78,8 +89,7 @@ const dataQualityLabels: Record<string, string> = {
   CONFLICTING_REPORTS: 'Çelişkili raporlar',
   DELAY_REASON_MISSING: 'Gecikme nedeni eksik',
   TASK_WITHOUT_DATES: 'Tarihsiz görev',
-  INSUFFICIENT_HISTORY:
-    'Karşılaştırma için yeterli geçmiş yok',
+  INSUFFICIENT_HISTORY: 'Karşılaştırma için yeterli geçmiş yok',
   UNLINKED_REPORT: 'Görevle ilişkilendirilmemiş rapor',
 }
 
@@ -97,20 +107,18 @@ const interventionLabels: Record<string, string> = {
   PENDING_REVIEW_REPORTS: 'Onay bekleyen rapor',
 }
 
-const classificationTones: Record<
-  string,
-  'success' | 'warning' | 'danger' | 'neutral' | 'info'
-> = {
-  reported_completed: 'success',
-  met: 'success',
-  below_target: 'warning',
-  partial: 'warning',
-  no_report: 'neutral',
-  no_target: 'neutral',
-  target_missing: 'info',
-  plan_conflict: 'danger',
-  plan_approved_after_week: 'danger',
-  no_percentage: 'info',
+const workStatusLabels: Record<string, string> = {
+  completed: 'Tamamlandı',
+  in_progress: 'Devam ediyor',
+  blocked: 'Engellendi',
+  not_started: 'Henüz başlanmadı',
+  unknown: 'Belirsiz',
+}
+
+const riskToneClass = {
+  danger: 'text-red-700',
+  warning: 'text-amber-700',
+  neutral: 'text-slate-500',
 }
 
 function AiLabel() {
@@ -122,7 +130,7 @@ function AiLabel() {
   )
 }
 
-function DeterministicLabel() {
+function RuleLabel() {
   return (
     <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200 ring-inset">
       <Database className="h-3 w-3" aria-hidden="true" />
@@ -131,86 +139,235 @@ function DeterministicLabel() {
   )
 }
 
-interface ReportSectionProps {
-  letter: string
+interface DisclosureProps {
   title: string
   description?: string
-  badge?: ReactNode
   children: ReactNode
-  tone?: 'default' | 'danger'
+  defaultOpen?: boolean
 }
 
-function ReportSection({
-  letter,
+function Disclosure({
   title,
   description,
-  badge,
   children,
-  tone = 'default',
-}: ReportSectionProps) {
+  defaultOpen = false,
+}: DisclosureProps) {
   return (
-    <Card
-      className={cn(
-        tone === 'danger' &&
-          'border-red-200 shadow-[0_0_0_1px_rgba(239,68,68,0.08)]',
-      )}
+    <details
+      className="card group"
+      open={defaultOpen ? true : undefined}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-worktrack-line px-5 py-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <span
-            className={cn(
-              'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-sm font-bold',
-              tone === 'danger'
-                ? 'bg-red-100 text-red-700'
-                : 'bg-worktrack-blue/10 text-worktrack-blue-dark',
-            )}
-            aria-hidden="true"
-          >
-            {letter}
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3.5 transition hover:bg-slate-50/70 [&::-webkit-details-marker]:hidden">
+        <div className="min-w-0">
+          <span className="text-sm font-semibold text-worktrack-ink">
+            {title}
           </span>
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold text-worktrack-ink">
-              {title}
-            </h2>
-            {description ? (
-              <p className="mt-0.5 text-sm text-slate-500">
-                {description}
-              </p>
-            ) : null}
-          </div>
+          {description ? (
+            <span className="ml-2 text-xs text-slate-500">
+              {description}
+            </span>
+          ) : null}
         </div>
-        {badge}
+        <ChevronDown
+          className="h-4 w-4 shrink-0 text-slate-400 transition group-open:rotate-180"
+          aria-hidden="true"
+        />
+      </summary>
+      <div className="space-y-4 border-t border-worktrack-line px-5 py-4">
+        {children}
       </div>
-      <div className="space-y-4 px-5 py-4">{children}</div>
-    </Card>
+    </details>
   )
 }
 
-function BlockList({
+function Kpi({
+  label,
+  value,
+  hint,
+  tone = 'default',
+}: {
+  label: string
+  value: number
+  hint?: string
+  tone?: 'default' | 'danger' | 'warning'
+}) {
+  const valueTone =
+    value > 0 && tone === 'danger'
+      ? 'text-red-600'
+      : value > 0 && tone === 'warning'
+        ? 'text-amber-600'
+        : 'text-worktrack-ink'
+
+  return (
+    <div className="rounded-xl border border-worktrack-line bg-white px-4 py-3 shadow-[0_1px_2px_rgba(15,35,60,0.04)]">
+      <p className="text-[11px] font-medium tracking-wide text-slate-500 uppercase">
+        {label}
+      </p>
+      <p
+        className={cn(
+          'mt-1 text-2xl font-semibold tabular-nums',
+          valueTone,
+        )}
+      >
+        {value}
+      </p>
+      {hint ? (
+        <p className="mt-0.5 text-[11px] text-slate-400">{hint}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function CompactSources({
+  sources,
+  registry,
+  className,
+}: {
+  sources: NarrativeSegment[]
+  registry: ReferenceRegistry
+  className?: string
+}) {
+  if (sources.length === 0) {
+    return null
+  }
+
+  const items: Array<{
+    key: string
+    label: string
+    code: string | null
+    href: string | null
+  }> = []
+  const seen = new Set<string>()
+
+  for (const segment of sources) {
+    const reference = resolveReference(segment, registry)
+
+    if (reference) {
+      if (seen.has(reference.code)) {
+        continue
+      }
+      seen.add(reference.code)
+      items.push({
+        key: reference.code,
+        label: reference.label,
+        code: reference.code,
+        href: reference.href,
+      })
+      continue
+    }
+
+    const label = segment.label ?? segment.text
+
+    if (!label || seen.has(`label:${label}`)) {
+      continue
+    }
+
+    seen.add(`label:${label}`)
+    items.push({
+      key: `label:${label}`,
+      label,
+      code: null,
+      href: null,
+    })
+  }
+
+  if (items.length === 0) {
+    return null
+  }
+
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-1 text-[11px]',
+        className,
+      )}
+    >
+      <span className="font-semibold tracking-wide text-slate-400 uppercase">
+        Kaynak
+      </span>
+      {items.map((item) =>
+        item.href ? (
+          <Link
+            key={item.key}
+            to={item.href}
+            title={item.label}
+            className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-semibold text-slate-600 ring-1 ring-slate-200 ring-inset transition hover:bg-slate-200"
+          >
+            {item.code ?? item.label}
+          </Link>
+        ) : (
+          <span
+            key={item.key}
+            title={item.label}
+            className="rounded bg-slate-100 px-1.5 py-0.5 font-mono font-semibold text-slate-500 ring-1 ring-slate-200 ring-inset"
+          >
+            {item.code ?? item.label}
+          </span>
+        ),
+      )}
+    </div>
+  )
+}
+
+function BlockItems({
   blocks,
-  emptyText,
+  registry,
 }: {
   blocks: NarrativeBlock[]
+  registry: ReferenceRegistry
+}) {
+  return (
+    <ul className="space-y-1.5">
+      {blocks.map((block, index) => (
+        <li
+          key={index}
+          className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5"
+        >
+          <p className="text-sm leading-6 text-slate-700">
+            <NarrativeText segments={block.segments} />
+          </p>
+          <CompactSources
+            sources={block.sources}
+            registry={registry}
+            className="mt-1"
+          />
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+function NarrativeBlocks({
+  blocks,
+  registry,
+  emptyText,
+  max,
+}: {
+  blocks: NarrativeBlock[]
+  registry: ReferenceRegistry
   emptyText: string
+  max?: number
 }) {
   if (blocks.length === 0) {
     return <p className="text-sm text-slate-500">{emptyText}</p>
   }
 
+  if (!max || blocks.length <= max) {
+    return <BlockItems blocks={blocks} registry={registry} />
+  }
+
   return (
-    <ul className="space-y-2.5">
-      {blocks.map((block, index) => (
-        <li
-          key={index}
-          className="rounded-lg border border-slate-200 bg-white px-3 py-2.5"
-        >
-          <p className="text-sm leading-6 text-slate-700">
-            <NarrativeText segments={block.segments} />
-          </p>
-          <SourceChips sources={block.sources} className="mt-2" />
-        </li>
-      ))}
-    </ul>
+    <div className="space-y-2">
+      <BlockItems blocks={blocks.slice(0, max)} registry={registry} />
+      <details>
+        <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-worktrack-ink">
+          Tümünü göster ({blocks.length})
+        </summary>
+        <div className="mt-2">
+          <BlockItems blocks={blocks.slice(max)} registry={registry} />
+        </div>
+      </details>
+    </div>
   )
 }
 
@@ -239,13 +396,13 @@ function formatPercent(value: number | null): string {
 }
 
 function TaskTable({ report }: { report: WeeklyReportDetail }) {
-  const tasks = report.metrics_snapshot.tasks
+  const tasks = sortTasksByRisk(report.metrics_snapshot.tasks)
 
   if (tasks.length === 0) {
     return (
       <EmptyState
         compact
-        icon={ListChecks}
+        icon={FolderKanban}
         title="Görev kapsamı boş"
         description="Bu hafta için değerlendirilecek görev bulunmuyor."
       />
@@ -257,12 +414,16 @@ function TaskTable({ report }: { report: WeeklyReportDetail }) {
       <table className="data-table">
         <thead>
           <tr>
-            <th scope="col">Görev</th>
             <th scope="col">Proje</th>
-            <th scope="col">Plan hedefi</th>
-            <th scope="col">Son bildirilen</th>
-            <th scope="col">Son rapor</th>
-            <th scope="col">Değerlendirme</th>
+            <th scope="col">Görev</th>
+            <th scope="col">Son bildirilen durum</th>
+            <th scope="col" className="text-right">
+              Planlanan kümülatif hedef
+            </th>
+            <th scope="col" className="text-right">
+              Son bildirilen toplam ilerleme
+            </th>
+            <th scope="col">Kısa risk</th>
           </tr>
         </thead>
         <tbody>
@@ -270,9 +431,22 @@ function TaskTable({ report }: { report: WeeklyReportDetail }) {
             const taskRef = report.references.tasks[task.task_token]
             const projectRef =
               report.references.projects[task.project_token]
+            const risk = taskRisk(task)
 
             return (
               <tr key={task.task_token}>
+                <td className="text-slate-600">
+                  {projectRef?.href ? (
+                    <Link
+                      to={projectRef.href}
+                      className="hover:text-worktrack-blue-dark hover:underline"
+                    >
+                      {projectRef.label ?? '—'}
+                    </Link>
+                  ) : (
+                    (projectRef?.label ?? '—')
+                  )}
+                </td>
                 <td>
                   {taskRef?.href ? (
                     <Link
@@ -287,19 +461,13 @@ function TaskTable({ report }: { report: WeeklyReportDetail }) {
                     </span>
                   )}
                 </td>
-                <td className="text-slate-600">
-                  {projectRef?.href ? (
-                    <Link
-                      to={projectRef.href}
-                      className="hover:text-worktrack-blue-dark hover:underline"
-                    >
-                      {projectRef.label ?? '—'}
-                    </Link>
-                  ) : (
-                    (projectRef?.label ?? '—')
-                  )}
-                </td>
                 <td className="whitespace-nowrap text-slate-600">
+                  {task.reported_status
+                    ? (workStatusLabels[task.reported_status] ??
+                      task.reported_status)
+                    : 'Rapor yok'}
+                </td>
+                <td className="text-right whitespace-nowrap text-slate-600 tabular-nums">
                   {formatPercent(task.target_completion_percentage)}
                   {task.plan_conflict ? (
                     <Badge tone="danger" className="ml-2">
@@ -307,32 +475,16 @@ function TaskTable({ report }: { report: WeeklyReportDetail }) {
                     </Badge>
                   ) : null}
                 </td>
-                <td className="whitespace-nowrap text-slate-600">
-                  {formatPercent(
-                    task.reported_completion_percentage,
+                <td className="text-right whitespace-nowrap text-slate-600 tabular-nums">
+                  {formatPercent(task.reported_completion_percentage)}
+                </td>
+                <td
+                  className={cn(
+                    'text-xs',
+                    risk ? riskToneClass[risk.tone] : 'text-slate-400',
                   )}
-                  {task.reported_status ? (
-                    <span className="ml-1 text-xs text-slate-400">
-                      ({task.reported_status})
-                    </span>
-                  ) : null}
-                </td>
-                <td className="text-slate-600">
-                  {task.latest_report?.received_at
-                    ? formatDateTime(
-                        task.latest_report.received_at,
-                      )
-                    : 'Rapor gönderilmedi'}
-                </td>
-                <td>
-                  <Badge
-                    tone={
-                      classificationTones[task.classification] ??
-                      'neutral'
-                    }
-                  >
-                    {task.classification_label}
-                  </Badge>
+                >
+                  {risk?.label ?? '—'}
                 </td>
               </tr>
             )
@@ -345,8 +497,10 @@ function TaskTable({ report }: { report: WeeklyReportDetail }) {
 
 function DataQualityList({
   report,
+  registry,
 }: {
   report: WeeklyReportDetail
+  registry: ReferenceRegistry
 }) {
   if (report.data_quality.length === 0) {
     return (
@@ -357,68 +511,48 @@ function DataQualityList({
   }
 
   return (
-    <ul className="space-y-2.5">
+    <ul className="space-y-2">
       {report.data_quality.map(
         (item: WeeklyDataQualityItem, index: number) => {
-          const taskSources = referenceSegments(
-            report,
-            'tasks',
-            item.task_tokens,
-          )
-          const projectSources = referenceSegments(
-            report,
-            'projects',
-            item.project_tokens,
-          )
-          const planSources = referenceSegments(
-            report,
-            'plans',
-            item.plan_tokens,
-          )
-          const reportSources = referenceSegments(
-            report,
-            'reports',
-            item.report_tokens,
-          )
+          const codes = [
+            ...codesForTokens(
+              registry,
+              'projects',
+              item.project_tokens,
+            ),
+            ...codesForTokens(registry, 'tasks', item.task_tokens),
+            ...codesForTokens(registry, 'plans', item.plan_tokens),
+            ...codesForTokens(registry, 'reports', item.report_tokens),
+          ]
 
           return (
             <li
               key={`${item.code}-${index}`}
-              className="rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2.5"
+              className="rounded-lg border border-amber-200 bg-amber-50/50 px-3 py-2"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone="warning">
                   {dataQualityLabels[item.code] ?? item.code}
                 </Badge>
-                <span className="text-xs font-mono text-amber-800/70">
-                  {item.code}
-                </span>
                 {item.count ? (
                   <span className="text-xs text-amber-800">
                     {item.count} kayıt
                   </span>
                 ) : null}
               </div>
-              <p className="mt-1.5 text-sm leading-6 text-amber-900">
+              <p className="mt-1 text-sm leading-6 text-amber-900">
                 {item.message}
               </p>
               {item.task_labels && item.task_labels.length > 0 ? (
-                <p className="mt-1.5 text-xs text-amber-900/80">
+                <p className="mt-1 text-xs text-amber-900/80">
                   Görevler: {item.task_labels.join(', ')}
                 </p>
               ) : null}
-              <div className="mt-2 flex flex-wrap gap-2">
-                <SourceChips
-                  sources={projectSources}
-                  label="Projeler"
-                />
-                <SourceChips sources={taskSources} label="Görevler" />
-                <SourceChips sources={planSources} label="Planlar" />
-                <SourceChips
-                  sources={reportSources}
-                  label="Raporlar"
-                />
-              </div>
+              {codes.length > 0 ? (
+                <p className="mt-1 font-mono text-[11px] text-amber-800/70">
+                  Kaynak: {codes.join(', ')}
+                </p>
+              ) : null}
             </li>
           )
         },
@@ -427,59 +561,260 @@ function DataQualityList({
   )
 }
 
-function InterventionCandidateCard({
-  report,
-  candidate,
-}: {
-  report: WeeklyReportDetail
-  candidate: WeeklyInterventionCandidate
-}) {
-  const meta = priorityMeta[candidate.priority]
-  const projectSources = referenceSegments(
-    report,
-    'projects',
-    candidate.project_tokens,
-  )
-  const taskSources = referenceSegments(
-    report,
-    'tasks',
-    candidate.task_tokens,
-  )
-  const reportSources = referenceSegments(
-    report,
-    'reports',
-    candidate.report_tokens,
-  )
-  const planSources = referenceSegments(
-    report,
-    'plans',
-    candidate.plan_tokens,
+interface UnifiedRisk {
+  key: string
+  priority: InterventionPriority
+  source: 'rule' | 'ai'
+  code: string | null
+  title: ReactNode
+  problem: ReactNode
+  action: ReactNode | null
+  sources: NarrativeSegment[]
+}
+
+function buildUnifiedRisks(
+  report: WeeklyReportDetail,
+): UnifiedRisk[] {
+  const rules: UnifiedRisk[] = report.intervention_candidates.map(
+    (candidate, index) => ({
+      key: `rule-${candidate.code}-${index}`,
+      priority: candidate.priority,
+      source: 'rule',
+      code: candidate.code,
+      title: candidate.title,
+      problem: candidate.description,
+      action: ruleActionSuggestions[candidate.code] ?? null,
+      sources: [
+        ...referenceSegments(
+          report,
+          'projects',
+          candidate.project_tokens,
+        ),
+        ...referenceSegments(report, 'tasks', candidate.task_tokens),
+        ...referenceSegments(report, 'plans', candidate.plan_tokens),
+        ...referenceSegments(report, 'reports', candidate.report_tokens),
+      ],
+    }),
   )
 
+  const ai: UnifiedRisk[] = (
+    report.narrative_view?.manager_interventions ?? []
+  ).map((intervention, index) => ({
+    key: `ai-${index}`,
+    priority: intervention.priority,
+    source: 'ai',
+    code: null,
+    title: <NarrativeText segments={intervention.title} />,
+    problem: <NarrativeText segments={intervention.problem} />,
+    action: (
+      <NarrativeText segments={intervention.recommended_action} />
+    ),
+    sources: [
+      ...intervention.affected_projects,
+      ...intervention.affected_tasks,
+      ...intervention.sources,
+    ],
+  }))
+
+  return [...rules, ...ai].sort(
+    (a, b) =>
+      comparePriority(a.priority, b.priority) ||
+      (a.source === b.source ? 0 : a.source === 'rule' ? -1 : 1),
+  )
+}
+
+function RiskList({
+  risks,
+  registry,
+}: {
+  risks: UnifiedRisk[]
+  registry: ReferenceRegistry
+}) {
+  if (risks.length === 0) {
+    return (
+      <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+        Deterministik kurallara ve AI değerlendirmesine göre bu hafta
+        müdahale gerektiren bir konu tespit edilmedi.
+      </p>
+    )
+  }
+
   return (
-    <li className="rounded-lg border border-red-200 bg-white px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Badge tone={meta.tone}>{meta.label}</Badge>
-        <Badge tone="neutral">
-          {interventionLabels[candidate.code] ?? candidate.code}
-        </Badge>
-        <span className="text-[11px] font-medium text-slate-400">
-          Kural: {candidate.code}
-        </span>
+    <ul className="space-y-2">
+      {risks.map((risk) => {
+        const meta = priorityMeta[risk.priority]
+
+        return (
+          <li
+            key={risk.key}
+            className={cn(
+              'rounded-lg border border-slate-200 border-l-4 bg-white px-3.5 py-2.5',
+              riskBorder[risk.priority],
+            )}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge tone={meta.tone}>{meta.label}</Badge>
+              {risk.source === 'rule' ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 ring-1 ring-slate-200 ring-inset">
+                  <Database className="h-3 w-3" aria-hidden="true" />
+                  Kural
+                  {risk.code
+                    ? ` · ${interventionLabels[risk.code] ?? risk.code}`
+                    : ''}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-700 ring-1 ring-violet-200 ring-inset">
+                  <Sparkles className="h-3 w-3" aria-hidden="true" />
+                  AI önerisi
+                </span>
+              )}
+            </div>
+            <p className="mt-1.5 text-sm font-semibold text-worktrack-ink">
+              {risk.title}
+            </p>
+            <p className="mt-0.5 text-sm leading-6 text-slate-600">
+              {risk.problem}
+            </p>
+            {risk.action ? (
+              <p className="mt-0.5 text-sm leading-6 text-slate-700">
+                <span className="font-semibold text-worktrack-ink">
+                  Önerilen aksiyon:{' '}
+                </span>
+                {risk.action}
+              </p>
+            ) : null}
+            <CompactSources
+              sources={risk.sources}
+              registry={registry}
+              className="mt-1.5"
+            />
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+function ReferenceList({
+  registry,
+}: {
+  registry: ReferenceRegistry
+}) {
+  const entries = Array.from(registry.entries())
+
+  if (entries.length === 0) {
+    return (
+      <p className="text-sm text-slate-500">
+        Bu rapor için kaynak referansı bulunmuyor.
+      </p>
+    )
+  }
+
+  return (
+    <dl className="grid gap-x-4 gap-y-1.5 sm:grid-cols-2 xl:grid-cols-3">
+      {entries.map(([key, reference]) => (
+        <div key={key} className="flex items-start gap-2 text-xs">
+          <dt className="font-mono font-semibold text-slate-500">
+            {reference.code}
+          </dt>
+          <dd className="min-w-0 text-slate-600">
+            {reference.href ? (
+              <Link
+                to={reference.href}
+                className="break-words hover:text-worktrack-blue-dark hover:underline"
+              >
+                {reference.label}
+              </Link>
+            ) : (
+              <span className="break-words">{reference.label}</span>
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function EmployeeActivity({
+  report,
+}: {
+  report: WeeklyReportDetail
+}) {
+  const employees = report.metrics_snapshot.employees
+
+  if (employees.length === 0) {
+    return (
+      <p className="text-sm text-slate-500">
+        Bu hafta için çalışan faaliyeti bulunmuyor.
+      </p>
+    )
+  }
+
+  const renderEmployee = (
+    employee: (typeof employees)[number],
+  ) => (
+    <li
+      key={employee.employee_token}
+      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2"
+    >
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-worktrack-ink">
+          {employee.full_name}
+        </p>
+        <p className="text-[11px] text-slate-500">
+          {employee.role ?? 'Pozisyon belirtilmedi'}
+          {employee.is_active ? '' : ' · Pasif'}
+        </p>
       </div>
-      <p className="mt-2 text-sm font-semibold text-worktrack-ink">
-        {candidate.title}
-      </p>
-      <p className="mt-1 text-sm leading-6 text-slate-600">
-        {candidate.description}
-      </p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <SourceChips sources={projectSources} label="Projeler" />
-        <SourceChips sources={taskSources} label="Görevler" />
-        <SourceChips sources={planSources} label="Planlar" />
-        <SourceChips sources={reportSources} label="Raporlar" />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge
+          tone={employee.report_count > 0 ? 'info' : 'neutral'}
+        >
+          {employee.report_count > 0
+            ? `${employee.report_count} rapor`
+            : 'Rapor gönderilmedi'}
+        </Badge>
+        <Badge tone="neutral">
+          {employee.assigned_task_tokens.length} görev
+        </Badge>
+        {employee.blocker_count > 0 ? (
+          <Badge tone="danger">
+            {employee.blocker_count} engel
+          </Badge>
+        ) : null}
+        {employee.pending_report_count > 0 ? (
+          <Badge tone="warning">
+            {employee.pending_report_count} onay bekliyor
+          </Badge>
+        ) : null}
       </div>
     </li>
+  )
+
+  const shown = employees.slice(0, 6)
+  const rest = employees.slice(6)
+
+  return (
+    <div className="space-y-2">
+      <ul className="space-y-1.5">
+        {shown.map((employee) => renderEmployee(employee))}
+      </ul>
+      {rest.length > 0 ? (
+        <details>
+          <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-worktrack-ink">
+            Tüm çalışanları göster ({employees.length})
+          </summary>
+          <ul className="mt-2 space-y-1.5">
+            {rest.map((employee) => renderEmployee(employee))}
+          </ul>
+        </details>
+      ) : null}
+      <p className="text-xs text-slate-500">
+        Eksik rapor, işin yapılmadığının kanıtı olarak
+        değerlendirilmez. Kişisel verimlilik puanı veya sıralaması
+        oluşturulmaz.
+      </p>
+    </div>
   )
 }
 
@@ -569,676 +904,615 @@ export function WeeklyReportPage() {
   const narrative = report.narrative_view
   const summary = report.metrics_snapshot.summary
   const comparison = report.metrics_snapshot.comparison
-  const interventions = report.intervention_candidates
-  const aiInterventions = narrative?.manager_interventions ?? []
+  const registry = buildReferenceRegistry(report)
+  const risks = buildUnifiedRisks(report)
 
   return (
-    <div className="space-y-5">
-      <Link
-        to="/raporlar?sekme=haftalik"
-        className="print-hide inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-worktrack-ink"
-      >
-        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        Raporlara dön
-      </Link>
+    <>
+      <div className="space-y-5 print:hidden">
+        <Link
+          to="/raporlar?sekme=haftalik"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 transition hover:text-worktrack-ink"
+        >
+          <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+          Raporlara dön
+        </Link>
 
-      <PageHeader
-        title="Haftalık Yönetici Raporu"
-        description={`${formatWeekRange(
-          report.week_start_date,
-          report.week_end_date,
-        )} · ${report.version}. sürüm`}
-        actions={
-          <div className="print-hide flex flex-wrap items-center gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => window.print()}
-              leftIcon={<Printer className="h-4 w-4" />}
-            >
-              Yazdır
-            </Button>
-            {report.status === 'failed' ? (
+        <PageHeader
+          title="Haftalık Yönetici Raporu"
+          description={`${formatWeekRange(
+            report.week_start_date,
+            report.week_end_date,
+          )} · ${report.version}. sürüm`}
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="secondary"
-                onClick={() => retryMutation.mutate()}
-                isLoading={retryMutation.isPending}
-                leftIcon={<RotateCcw className="h-4 w-4" />}
+                onClick={() => window.print()}
+                leftIcon={<Printer className="h-4 w-4" />}
               >
-                Yeniden dene
+                Yazdır
               </Button>
-            ) : null}
-            <Button
-              variant="danger"
-              onClick={() => setConfirmDelete(true)}
-              disabled={report.status === 'pending'}
-              leftIcon={<Trash2 className="h-4 w-4" />}
-            >
-              Sil
-            </Button>
-          </div>
-        }
-      />
+              {report.status === 'failed' ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => retryMutation.mutate()}
+                  isLoading={retryMutation.isPending}
+                  leftIcon={<RotateCcw className="h-4 w-4" />}
+                >
+                  Yeniden dene
+                </Button>
+              ) : null}
+              <Button
+                variant="danger"
+                onClick={() => setConfirmDelete(true)}
+                disabled={report.status === 'pending'}
+                leftIcon={<Trash2 className="h-4 w-4" />}
+              >
+                Sil
+              </Button>
+            </div>
+          }
+        />
 
-      <Card className="p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge tone={meta.tone}>{meta.label}</Badge>
-            <Badge tone="info">v{report.version}</Badge>
-            {report.is_partial_week ? (
-              <Badge tone="warning">Kısmi hafta</Badge>
-            ) : (
-              <Badge tone="success">Tamamlanmış hafta</Badge>
-            )}
-            {narrative ? (
-              narrative.source === 'deterministic_empty' ? (
-                <Badge tone="neutral">Yapay zekâ çağrılmadı</Badge>
+        <Card className="px-5 py-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={meta.tone}>{meta.label}</Badge>
+              <Badge tone="info">v{report.version}</Badge>
+              {report.is_partial_week ? (
+                <Badge tone="warning">Kısmi hafta</Badge>
               ) : (
-                <Badge tone="info">AI destekli yorum</Badge>
-              )
-            ) : null}
+                <Badge tone="success">Tamamlanmış hafta</Badge>
+              )}
+              {narrative ? (
+                narrative.source === 'deterministic_empty' ? (
+                  <Badge tone="neutral">Yapay zekâ çağrılmadı</Badge>
+                ) : (
+                  <Badge tone="info">AI destekli yorum</Badge>
+                )
+              ) : null}
+            </div>
+            <p className="text-xs text-slate-500">
+              Oluşturulma: {formatDateTime(report.created_at)}
+              {report.completed_at
+                ? ` · Tamamlanma: ${formatDateTime(
+                    report.completed_at,
+                  )}`
+                : ''}
+            </p>
           </div>
-          <p className="text-xs text-slate-500">
-            Oluşturulma: {formatDateTime(report.created_at)}
-            {report.completed_at
-              ? ` · Tamamlanma: ${formatDateTime(
-                  report.completed_at,
-                )}`
-              : ''}
-          </p>
+          <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+            <span>
+              Dönem:{' '}
+              <span className="font-medium text-worktrack-ink">
+                {formatWeekRange(
+                  report.week_start_date,
+                  report.week_end_date,
+                )}
+              </span>
+            </span>
+            <span>
+              Model:{' '}
+              <span className="font-medium text-worktrack-ink">
+                {report.model ?? '—'}
+              </span>
+            </span>
+          </div>
+        </Card>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+          <Kpi label="Proje sayısı" value={summary.project_count} />
+          <Kpi label="Görev sayısı" value={summary.task_count} />
+          <Kpi
+            label="İş raporu"
+            value={summary.report_count}
+            hint={
+              summary.pending_review_report_count > 0
+                ? `${summary.pending_review_report_count} onay bekliyor`
+                : undefined
+            }
+          />
+          <Kpi
+            label="Engelli görev"
+            value={summary.blocked_task_count}
+            tone="danger"
+          />
+          <Kpi
+            label="Geciken görev"
+            value={summary.overdue_not_completed_count}
+            tone="warning"
+          />
         </div>
 
-        <dl className="mt-5 grid gap-4 border-t border-worktrack-line pt-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div>
-            <dt className="text-xs text-slate-500">Hafta</dt>
-            <dd className="mt-0.5 text-sm font-semibold text-worktrack-ink">
-              {formatWeekRange(
-                report.week_start_date,
-                report.week_end_date,
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">Model</dt>
-            <dd className="mt-0.5 truncate text-sm font-semibold text-worktrack-ink">
-              {report.model ?? '—'}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">Kapsam</dt>
-            <dd className="mt-0.5 text-sm font-semibold text-worktrack-ink">
-              {summary.project_count} proje · {summary.task_count}{' '}
-              görev
-            </dd>
-          </div>
-          <div>
-            <dt className="text-xs text-slate-500">
-              Onaylı iş raporu
-            </dt>
-            <dd className="mt-0.5 text-sm font-semibold text-worktrack-ink">
-              {summary.report_count}
-              {summary.pending_review_report_count > 0
-                ? ` · ${summary.pending_review_report_count} onay bekliyor`
-                : ''}
-            </dd>
-          </div>
-        </dl>
-      </Card>
-
-      {report.status === 'failed' ? (
-        <Alert tone="error" title="Rapor oluşturulamadı">
-          <p>
-            {report.error_message ??
-              'Rapor oluşturulurken bir hata oluştu. Lütfen yeniden deneyin.'}
-          </p>
-          <p className="mt-2 text-xs">
-            Bu sürüm için anlatı kaydedilmedi. Yeniden deneme aynı
-            sürümü kullanır; yeni bir sürüm oluşturmaz.
-          </p>
-        </Alert>
-      ) : null}
-
-      {report.status === 'pending' ? (
-        <Alert tone="info" title="Rapor hazırlanıyor">
-          <p>
-            Bu rapor şu anda oluşturuluyor. Durum birkaç saniyede bir
-            otomatik yenilenir.
-          </p>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="mt-2"
-            onClick={() => void reportQuery.refetch()}
-            isLoading={reportQuery.isFetching}
-          >
-            Durumu yenile
-          </Button>
-        </Alert>
-      ) : null}
-
-      {narrative?.partial_week_note ? (
-        <Alert tone="warning" title="Kısmi değerlendirme">
-          <NarrativeText segments={narrative.partial_week_note} />
-        </Alert>
-      ) : null}
-
-      {narrative?.source === 'deterministic_empty' ? (
-        <Alert tone="info" title="Veri bulunmayan hafta">
-          Bu hafta için değerlendirilecek görev, iş raporu veya
-          haftalık plan bulunmadığından yapay zekâ çağrılmadı. Boş
-          rapor deterministik olarak oluşturuldu.
-        </Alert>
-      ) : null}
-
-      {narrative ? (
-        <>
-          <ReportSection
-            letter="A"
-            title="Genel Özet"
-            description="Haftanın yönetici düzeyinde özeti."
-            badge={<AiLabel />}
-          >
-            <p className="text-sm leading-6 text-slate-700">
-              <NarrativeText segments={narrative.general_summary} />
+        {report.status === 'failed' ? (
+          <Alert tone="error" title="Rapor oluşturulamadı">
+            <p>
+              {report.error_message ??
+                'Rapor oluşturulurken bir hata oluştu. Lütfen yeniden deneyin.'}
             </p>
-            <div>
-              <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                Öne çıkanlar
-              </h3>
-              <BlockList
-                blocks={narrative.general_highlights}
-                emptyText="Öne çıkan bir gelişme belirtilmedi."
-              />
-            </div>
-            <div>
-              <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                Dikkat edilmesi gerekenler
-              </h3>
-              <BlockList
-                blocks={narrative.general_issues}
-                emptyText="Genel düzeyde dikkat çeken bir sorun belirtilmedi."
-              />
-            </div>
-          </ReportSection>
+            <p className="mt-2 text-xs">
+              Bu sürüm için anlatı kaydedilmedi. Yeniden deneme aynı
+              sürümü kullanır; yeni bir sürüm oluşturmaz.
+            </p>
+          </Alert>
+        ) : null}
 
-          <ReportSection
-            letter="B"
-            title="Proje Bazında"
-            description="Yalnızca görev atamaları üzerinden projeye bağlanan kayıtlar."
-            badge={<AiLabel />}
-          >
-            {narrative.project_analyses.length === 0 ? (
-              <p className="text-sm text-slate-500">
-                Bu hafta için proje bazlı bir değerlendirme yok.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {narrative.project_analyses.map(
-                  (project, index) => (
-                    <div
-                      key={index}
-                      className="rounded-lg border border-slate-200 bg-slate-50/50 p-4"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <FolderKanban
-                          className="h-4 w-4 text-slate-400"
-                          aria-hidden="true"
-                        />
-                        <span className="font-semibold text-worktrack-ink">
-                          <NarrativeText
-                            segments={[project.project]}
-                          />
-                        </span>
-                      </div>
-                      <p className="mt-2 text-sm leading-6 text-slate-700">
-                        <NarrativeText
-                          segments={project.summary}
-                        />
-                      </p>
-                      <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                        <div>
-                          <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                            Öne çıkanlar
-                          </h4>
-                          <BlockList
-                            blocks={project.highlights}
-                            emptyText="Belirtilmedi."
-                          />
-                        </div>
-                        <div>
-                          <h4 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                            Riskler
-                          </h4>
-                          <BlockList
-                            blocks={project.risks}
-                            emptyText="Belirtilmedi."
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
-          </ReportSection>
+        {report.status === 'pending' ? (
+          <Alert tone="info" title="Rapor hazırlanıyor">
+            <p>
+              Bu rapor şu anda oluşturuluyor. Durum birkaç saniyede
+              bir otomatik yenilenir.
+            </p>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="mt-2"
+              onClick={() => void reportQuery.refetch()}
+              isLoading={reportQuery.isFetching}
+            >
+              Durumu yenile
+            </Button>
+          </Alert>
+        ) : null}
 
-          <ReportSection
-            letter="C"
-            title="Çalışan Bazında"
-            description="Çalışanlar yalnızca kendi iş raporları ve görev atamaları üzerinden değerlendirilir."
-            badge={<AiLabel />}
-          >
-            {narrative.employee_analyses.length === 0 ? (
-              <p className="text-sm text-slate-500">
-                Bu hafta için çalışan bazlı bir değerlendirme yok.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {narrative.employee_analyses.map(
-                  (employee, index) => (
-                    <div
-                      key={index}
-                      className="rounded-lg border border-slate-200 bg-white p-4"
-                    >
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Users
-                          className="h-4 w-4 text-slate-400"
-                          aria-hidden="true"
-                        />
-                        <span className="font-semibold text-worktrack-ink">
-                          <NarrativeText
-                            segments={[employee.employee]}
-                          />
-                        </span>
-                      </div>
-                      <p className="mt-2 text-sm leading-6 text-slate-700">
-                        <NarrativeText
-                          segments={employee.summary}
-                        />
-                      </p>
-                      <div className="mt-3">
-                        <BlockList
-                          blocks={employee.observations}
-                          emptyText="Gözlem belirtilmedi."
-                        />
-                      </div>
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
-          </ReportSection>
+        {narrative?.partial_week_note ? (
+          <Alert tone="warning" title="Kısmi değerlendirme">
+            <NarrativeText segments={narrative.partial_week_note} />
+          </Alert>
+        ) : null}
 
-          <ReportSection
-            letter="D"
-            title="Planlanan vs Gerçekleşen"
-            description="Hedef yüzdesi ile bildirilen tamamlanma yüzdesi aynı şey değildir. Farklı çalışanların yüzdeleri ortalanmaz."
-            badge={<AiLabel />}
-          >
-            <div className="rounded-lg border border-slate-200 bg-white p-3">
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <DeterministicLabel />
-                <span className="text-xs text-slate-500">
-                  Sayılar deterministik metriklerden gelir.
-                </span>
+        {narrative?.source === 'deterministic_empty' ? (
+          <Alert tone="info" title="Veri bulunmayan hafta">
+            Bu hafta için değerlendirilecek görev, iş raporu veya
+            haftalık plan bulunmadığından yapay zekâ çağrılmadı. Boş
+            rapor deterministik olarak oluşturuldu.
+          </Alert>
+        ) : null}
+
+        {narrative ? (
+          <>
+            <Card>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-worktrack-line px-5 py-3.5">
+                <div>
+                  <h2 className="text-sm font-semibold text-worktrack-ink">
+                    Genel durum
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Haftanın kısa yönetici özeti.
+                  </p>
+                </div>
+                <AiLabel />
               </div>
-              <TaskTable report={report} />
-            </div>
-            <div>
-              <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                Görev değerlendirmeleri
-              </h3>
-              {narrative.task_assessments.length === 0 ? (
-                <p className="text-sm text-slate-500">
-                  Görev değerlendirmesi belirtilmedi.
+              <div className="space-y-3 px-5 py-4">
+                <p className="text-sm leading-6 text-slate-700">
+                  <NarrativeText segments={narrative.general_summary} />
                 </p>
-              ) : (
-                <ul className="space-y-2.5">
-                  {narrative.task_assessments.map(
-                    (task, index) => (
-                      <li
-                        key={index}
-                        className="rounded-lg border border-slate-200 bg-white px-3 py-2.5"
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-worktrack-ink">
-                            <NarrativeText segments={[task.task]} />
-                          </span>
-                          <Badge
-                            tone={
-                              classificationTones[
-                                task.classification
-                              ] ?? 'neutral'
-                            }
-                          >
-                            {task.classification_label}
-                          </Badge>
-                        </div>
-                        <p className="mt-1.5 text-sm leading-6 text-slate-700">
-                          <NarrativeText
-                            segments={task.assessment}
-                          />
-                        </p>
-                        <SourceChips
-                          sources={task.sources}
-                          className="mt-2"
-                        />
-                      </li>
-                    ),
-                  )}
-                </ul>
-              )}
-            </div>
-          </ReportSection>
-
-          <ReportSection
-            letter="E"
-            title="Gerçekleşmeyen İşler"
-            description="Rapor gönderilmemesi, işin tamamlanmadığı anlamına gelmez; eksik rapor nötr değerlendirilir."
-            badge={<AiLabel />}
-          >
-            <BlockList
-              blocks={narrative.unmet_work_analysis}
-              emptyText="Gerçekleşmeyen iş bildirimi yok."
-            />
-            {summary.no_report_task_count > 0 ? (
-              <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                Deterministik kapsamda{' '}
-                <span className="font-semibold text-worktrack-ink">
-                  {summary.no_report_task_count}
-                </span>{' '}
-                görev için bu hafta onaylı rapor bulunmuyor. Bu
-                görevler “Rapor gönderilmedi” olarak sınıflandırılır.
-              </p>
-            ) : null}
-          </ReportSection>
-
-          <ReportSection
-            letter="F"
-            title="Geçmiş Hafta Karşılaştırması"
-            description="Yalnızca gerçek rapor kayıtları karşılaştırılır."
-            badge={<AiLabel />}
-          >
-            <div className="rounded-lg border border-slate-200 bg-white p-3">
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <History
-                  className="h-4 w-4 text-slate-400"
-                  aria-hidden="true"
-                />
-                <DeterministicLabel />
-              </div>
-              {comparison.available ? (
-                <dl className="grid gap-3 text-sm sm:grid-cols-3">
+                <div className="grid gap-3 lg:grid-cols-2">
                   <div>
-                    <dt className="text-xs text-slate-500">
-                      Önceki hafta
-                    </dt>
-                    <dd className="font-semibold text-worktrack-ink">
+                    <h3 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                      Öne çıkan gelişmeler
+                    </h3>
+                    <NarrativeBlocks
+                      blocks={narrative.general_highlights}
+                      registry={registry}
+                      emptyText="Öne çıkan bir gelişme belirtilmedi."
+                      max={3}
+                    />
+                  </div>
+                  <div>
+                    <h3 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                      Önemli sorunlar
+                    </h3>
+                    <NarrativeBlocks
+                      blocks={narrative.general_issues}
+                      registry={registry}
+                      emptyText="Genel düzeyde dikkat çeken bir sorun belirtilmedi."
+                      max={3}
+                    />
+                  </div>
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-worktrack-line px-5 py-3.5">
+                <div>
+                  <h2 className="text-sm font-semibold text-worktrack-ink">
+                    Proje ve görev durumu
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Hedef ile son bildirilen toplam ilerleme ayrı
+                    değerlerdir.
+                  </p>
+                </div>
+                <RuleLabel />
+              </div>
+              <div className="px-5 py-4">
+                <TaskTable report={report} />
+              </div>
+            </Card>
+
+            <Card className="border-red-200">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-100 bg-red-50/40 px-5 py-3.5">
+                <div>
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-worktrack-ink">
+                    <ShieldCheck
+                      className="h-4 w-4 text-red-500"
+                      aria-hidden="true"
+                    />
+                    Riskler ve yönetici aksiyonları
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Kural tespitleri ile AI önerileri tek listede,
+                    öncelik sırasına göre.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  <RuleLabel />
+                  <AiLabel />
+                </div>
+              </div>
+              <div className="px-5 py-4">
+                <RiskList risks={risks} registry={registry} />
+              </div>
+            </Card>
+
+            <Card>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-worktrack-line px-5 py-3.5">
+                <div>
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-worktrack-ink">
+                    <Users
+                      className="h-4 w-4 text-slate-400"
+                      aria-hidden="true"
+                    />
+                    Çalışan faaliyetleri ve geçmiş
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Yalnızca bildirilen faaliyetler; kişisel sıralama
+                    yok.
+                  </p>
+                </div>
+              </div>
+              <div className="space-y-4 px-5 py-4">
+                <EmployeeActivity report={report} />
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <History
+                      className="h-4 w-4 text-slate-400"
+                      aria-hidden="true"
+                    />
+                    <span className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                      Geçmiş hafta karşılaştırması
+                    </span>
+                  </div>
+                  {comparison.available ? (
+                    <p className="mt-1 text-sm text-slate-700">
                       {formatWeekRange(
                         comparison.prior_week_start_date,
                         comparison.prior_week_end_date,
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">
-                      Onaylı rapor (bu hafta / önceki)
-                    </dt>
-                    <dd className="font-semibold text-worktrack-ink">
-                      {comparison.current_report_count} /{' '}
-                      {comparison.prior_report_count}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-slate-500">
-                      Değişim
-                    </dt>
-                    <dd className="font-semibold text-worktrack-ink">
+                      )}{' '}
+                      haftasında{' '}
+                      <span className="font-semibold text-worktrack-ink">
+                        {comparison.prior_report_count}
+                      </span>{' '}
+                      onaylı rapor vardı; bu hafta{' '}
+                      <span className="font-semibold text-worktrack-ink">
+                        {comparison.current_report_count}
+                      </span>{' '}
+                      rapor var (
                       {comparison.report_count_change > 0
                         ? `+${comparison.report_count_change}`
                         : comparison.report_count_change}
-                    </dd>
+                      ).
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-sm text-slate-600">
+                      Karşılaştırma için yeterli geçmiş veri yok. Bu
+                      hafta tek başına değerlendirildi.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </Card>
+
+            <Disclosure
+              title="Hesaplama ve kaynak ayrıntıları"
+              description="Teknik sınırlamalar, veri kalitesi ve kaynak referansları."
+            >
+              <div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <RuleLabel />
+                  <span className="text-xs text-slate-500">
+                    Veri kalitesi uyarıları
+                  </span>
+                </div>
+                <DataQualityList report={report} registry={registry} />
+              </div>
+
+              <div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <AiLabel />
+                  <span className="text-xs text-slate-500">
+                    AI veri kalitesi notları
+                  </span>
+                </div>
+                <NarrativeBlocks
+                  blocks={narrative.data_quality_notes}
+                  registry={registry}
+                  emptyText="AI veri kalitesi notu belirtilmedi."
+                />
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Proje değerlendirmeleri
+                </h3>
+                {narrative.project_analyses.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    Bu hafta için proje bazlı bir değerlendirme yok.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {narrative.project_analyses.map(
+                      (project, index) => (
+                        <div
+                          key={index}
+                          className="rounded-lg border border-slate-200 bg-slate-50/50 px-3 py-2"
+                        >
+                          <p className="flex items-center gap-2 text-sm font-semibold text-worktrack-ink">
+                            <FolderKanban
+                              className="h-4 w-4 text-slate-400"
+                              aria-hidden="true"
+                            />
+                            <NarrativeText
+                              segments={[project.project]}
+                            />
+                          </p>
+                          <p className="mt-1 text-sm leading-6 text-slate-700">
+                            <NarrativeText
+                              segments={project.summary}
+                            />
+                          </p>
+                          <div className="mt-2 grid gap-2 lg:grid-cols-2">
+                            <div>
+                              <p className="mb-1 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">
+                                Öne çıkanlar
+                              </p>
+                              <NarrativeBlocks
+                                blocks={project.highlights}
+                                registry={registry}
+                                emptyText="Belirtilmedi."
+                                max={2}
+                              />
+                            </div>
+                            <div>
+                              <p className="mb-1 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">
+                                Riskler
+                              </p>
+                              <NarrativeBlocks
+                                blocks={project.risks}
+                                registry={registry}
+                                emptyText="Belirtilmedi."
+                                max={2}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ),
+                    )}
                   </div>
-                </dl>
-              ) : (
-                <p className="text-sm text-slate-600">
-                  Karşılaştırma için yeterli geçmiş veri yok. Bu hafta
-                  tek başına değerlendirildi.
-                </p>
-              )}
-            </div>
-            <BlockList
-              blocks={narrative.history_comparison}
-              emptyText="Geçmiş karşılaştırma yorumu belirtilmedi."
-            />
-          </ReportSection>
-
-          <ReportSection
-            letter="G"
-            title="Öneriler"
-            description="Öneriler yönetici kararı değil, kaynaklara dayalı AI önerileridir."
-            badge={<AiLabel />}
-          >
-            <div className="flex items-center gap-2">
-              <Lightbulb
-                className="h-4 w-4 text-amber-500"
-                aria-hidden="true"
-              />
-              <span className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                Kaynaklara dayalı öneriler
-              </span>
-            </div>
-            <BlockList
-              blocks={narrative.recommendations}
-              emptyText="Bu hafta için öneri belirtilmedi."
-            />
-          </ReportSection>
-
-          <ReportSection
-            letter="H"
-            title="Veri Kalitesi"
-            description="Eksik veya çelişkili veri, sayıların yorumunu etkileyebilir."
-            badge={<DeterministicLabel />}
-          >
-            <DataQualityList report={report} />
-            <div>
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <AiLabel />
-                <span className="text-xs text-slate-500">
-                  AI veri kalitesi notları
-                </span>
+                )}
               </div>
-              <BlockList
-                blocks={narrative.data_quality_notes}
-                emptyText="AI veri kalitesi notu belirtilmedi."
-              />
-            </div>
-          </ReportSection>
 
-          <ReportSection
-            letter="I"
-            title="Yönetici Müdahalesi Gerektiren Konular"
-            description="Deterministik kurallar ve AI önerileri ayrı etiketlenmiştir. Öncelikler AI önerisidir; nihai karar yöneticinindir."
-            badge={
-              <div className="flex flex-wrap gap-1.5">
-                <DeterministicLabel />
-                <AiLabel />
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Çalışan değerlendirmeleri
+                </h3>
+                {narrative.employee_analyses.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    Bu hafta için çalışan bazlı bir değerlendirme yok.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {narrative.employee_analyses.map(
+                      (employee, index) => (
+                        <div
+                          key={index}
+                          className="rounded-lg border border-slate-200 bg-white px-3 py-2"
+                        >
+                          <p className="text-sm font-semibold text-worktrack-ink">
+                            <NarrativeText
+                              segments={[employee.employee]}
+                            />
+                          </p>
+                          <p className="mt-1 text-sm leading-6 text-slate-700">
+                            <NarrativeText
+                              segments={employee.summary}
+                            />
+                          </p>
+                          <div className="mt-2">
+                            <NarrativeBlocks
+                              blocks={employee.observations}
+                              registry={registry}
+                              emptyText="Gözlem belirtilmedi."
+                              max={2}
+                            />
+                          </div>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                )}
               </div>
-            }
-            tone="danger"
-          >
-            <div>
-              <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                <ShieldCheck
-                  className="h-4 w-4 text-red-500"
-                  aria-hidden="true"
-                />
-                Deterministik müdahale adayları
-              </h3>
-              {interventions.length === 0 ? (
-                <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                  Deterministik kurallara göre bu hafta müdahale
-                  gerektiren bir konu tespit edilmedi.
-                </p>
-              ) : (
-                <ul className="space-y-2.5">
-                  {interventions.map((candidate, index) => (
-                    <InterventionCandidateCard
-                      key={`${candidate.code}-${index}`}
-                      report={report}
-                      candidate={candidate}
-                    />
-                  ))}
-                </ul>
-              )}
-            </div>
 
-            <div>
-              <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
-                <Siren
-                  className="h-4 w-4 text-violet-500"
-                  aria-hidden="true"
-                />
-                AI müdahale önerileri
-              </h3>
-              {aiInterventions.length === 0 ? (
-                <p className="text-sm text-slate-500">
-                  AI bu hafta için ayrı bir müdahale önerisi
-                  belirtmedi.
-                </p>
-              ) : (
-                <ul className="space-y-2.5">
-                  {aiInterventions.map(
-                    (intervention, index) => {
-                      const meta =
-                        priorityMeta[intervention.priority]
-
-                      return (
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Görev değerlendirmeleri
+                </h3>
+                {narrative.task_assessments.length === 0 ? (
+                  <p className="text-sm text-slate-500">
+                    Görev değerlendirmesi belirtilmedi.
+                  </p>
+                ) : (
+                  <ul className="space-y-2">
+                    {narrative.task_assessments.map(
+                      (task, index) => (
                         <li
                           key={index}
-                          className="rounded-lg border border-violet-200 bg-violet-50/40 px-4 py-3"
+                          className="rounded-lg border border-slate-200 bg-white px-3 py-2"
                         >
                           <div className="flex flex-wrap items-center gap-2">
-                            <Badge tone={meta.tone}>
-                              {meta.label}
+                            <span className="text-sm font-semibold text-worktrack-ink">
+                              <NarrativeText segments={[task.task]} />
+                            </span>
+                            <Badge tone="neutral">
+                              {task.classification_label}
                             </Badge>
-                            <span className="text-[11px] font-semibold text-violet-700">
-                              AI önerisi
-                            </span>
                           </div>
-                          <p className="mt-2 text-sm font-semibold text-worktrack-ink">
-                            <NarrativeText
-                              segments={intervention.title}
-                            />
-                          </p>
                           <p className="mt-1 text-sm leading-6 text-slate-700">
                             <NarrativeText
-                              segments={intervention.problem}
+                              segments={task.assessment}
                             />
                           </p>
-                          <p className="mt-1 text-sm leading-6 text-slate-700">
-                            <span className="font-semibold text-worktrack-ink">
-                              Önerilen eylem:{' '}
-                            </span>
-                            <NarrativeText
-                              segments={
-                                intervention.recommended_action
-                              }
-                            />
-                          </p>
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <SourceChips
-                              sources={intervention.affected_projects}
-                              label="Etkilenen projeler"
-                            />
-                            <SourceChips
-                              sources={intervention.affected_tasks}
-                              label="Etkilenen görevler"
-                            />
-                            <SourceChips
-                              sources={intervention.sources}
-                            />
-                          </div>
+                          <CompactSources
+                            sources={task.sources}
+                            registry={registry}
+                            className="mt-1.5"
+                          />
                         </li>
-                      )
-                    },
-                  )}
-                </ul>
-              )}
-            </div>
-          </ReportSection>
+                      ),
+                    )}
+                  </ul>
+                )}
+              </div>
 
-          <ReportSection
-            letter="i"
-            title="Hesaplama Açıklaması"
-            description="Sayıların nasıl üretildiğini ve sınırlamaları açıklar."
-            badge={<DeterministicLabel />}
-          >
-            <ul className="space-y-2 text-sm leading-6 text-slate-600">
-              <li>
-                Hafta sınırları Europe/Istanbul saat diliminde
-                pazartesi–pazar olarak hesaplanır. Rapor kayıtları
-                <span className="font-medium text-worktrack-ink">
-                  {' '}
-                  received_at
-                </span>{' '}
-                (veritabanına kayıt zamanı) üzerinden haftaya
-                atanır. Telegram mesajının gönderilme zamanı bu
-                raporda kullanılmaz; iki zaman farklı olabilir.
-              </li>
-              <li>
-                Faaliyet metriklerine yalnızca{' '}
-                <span className="font-medium text-worktrack-ink">
-                  onaylanmış
-                </span>{' '}
-                iş raporları girer. Onay bekleyen raporlar ayrı
-                sayılır, reddedilen raporlar hariç tutulur.
-              </li>
-              <li>
-                Hedef tamamlanma yüzdesi (
-                <span className="font-mono text-xs">
-                  target_completion_percentage
-                </span>
-                ) ile çalışanın bildirdiği tamamlanma yüzdesi (
-                <span className="font-mono text-xs">
-                  completion_percentage
-                </span>
-                ) aynı kavram değildir.
-              </li>
-              <li>
-                Farklı çalışanların tamamlanma yüzdeleri
-                ortalanmaz. Proje düzeyinde ilerleme yüzdesi
-                hesaplanmaz; proje çalışanları yalnızca görev
-                atamaları üzerinden türetilir.
-              </li>
-              <li>
-                Kısmi hafta değerlendirmesi kesin bir performans
-                sonucu değildir; hafta tamamlanmadan verilen
-                rapordur.
-              </li>
-              <li>
-                Eksik rapor “Rapor gönderilmedi” olarak nötr
-                biçimde gösterilir; işin tamamlanmadığı anlamına
-                gelmez.
-              </li>
-              {Object.entries(
-                report.metrics_snapshot.methodology,
-              ).map(([key, value]) => (
-                <li key={key}>
-                  <span className="font-mono text-xs text-slate-400">
-                    {key}
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Gerçekleşmeyen işler
+                </h3>
+                <NarrativeBlocks
+                  blocks={narrative.unmet_work_analysis}
+                  registry={registry}
+                  emptyText="Gerçekleşmeyen iş bildirimi yok."
+                  max={3}
+                />
+                {summary.no_report_task_count > 0 ? (
+                  <p className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                    Deterministik kapsamda{' '}
+                    <span className="font-semibold text-worktrack-ink">
+                      {summary.no_report_task_count}
+                    </span>{' '}
+                    görev için bu hafta onaylı rapor bulunmuyor. Bu
+                    görevler “Rapor gönderilmedi” olarak sınıflandırılır
+                    ve işin yapılmadığı anlamına gelmez.
+                  </p>
+                ) : null}
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Öneriler
+                </h3>
+                <NarrativeBlocks
+                  blocks={narrative.recommendations}
+                  registry={registry}
+                  emptyText="Bu hafta için öneri belirtilmedi."
+                  max={3}
+                />
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Geçmiş karşılaştırma yorumu
+                </h3>
+                <NarrativeBlocks
+                  blocks={narrative.history_comparison}
+                  registry={registry}
+                  emptyText="Geçmiş karşılaştırma yorumu belirtilmedi."
+                  max={2}
+                />
+              </div>
+
+              <div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <RuleLabel />
+                  <span className="text-xs text-slate-500">
+                    Hesaplama açıklaması ve sınırlamalar
                   </span>
-                  : {value}
-                </li>
-              ))}
-            </ul>
-          </ReportSection>
-        </>
-      ) : report.status === 'completed' ? (
-        <Alert tone="warning" title="Anlatı bulunamadı">
-          Bu rapor tamamlandı olarak işaretlenmiş ancak kayıtlı bir
-          anlatı bulunmuyor. Raporu yeniden oluşturmayı deneyin.
-        </Alert>
-      ) : null}
+                </div>
+                <ul className="space-y-1.5 text-sm leading-6 text-slate-600">
+                  <li>
+                    Hafta sınırları Europe/Istanbul saat diliminde
+                    pazartesi–pazar olarak hesaplanır. Rapor kayıtları{' '}
+                    <span className="font-medium text-worktrack-ink">
+                      received_at
+                    </span>{' '}
+                    (veritabanına kayıt zamanı) üzerinden haftaya atanır.
+                    Telegram mesajının gönderilme zamanı bu raporda
+                    kullanılmaz.
+                  </li>
+                  <li>
+                    Faaliyet metriklerine yalnızca{' '}
+                    <span className="font-medium text-worktrack-ink">
+                      onaylanmış
+                    </span>{' '}
+                    iş raporları girer. Onay bekleyen raporlar ayrı
+                    sayılır, reddedilen raporlar hariç tutulur.
+                  </li>
+                  <li>
+                    Hedef tamamlanma yüzdesi (
+                    <span className="font-mono text-xs">
+                      target_completion_percentage
+                    </span>
+                    ) ile çalışanın bildirdiği toplam ilerleme (
+                    <span className="font-mono text-xs">
+                      completion_percentage
+                    </span>
+                    ) aynı kavram değildir. Farklı çalışanların
+                    yüzdeleri ortalanmaz.
+                  </li>
+                  <li>
+                    Kısmi hafta değerlendirmesi kesin bir performans
+                    sonucu değildir; hafta tamamlanmadan verilen
+                    rapordur.
+                  </li>
+                  <li>
+                    Eksik rapor “Rapor gönderilmedi” olarak nötr
+                    biçimde gösterilir; işin tamamlanmadığı anlamına
+                    gelmez.
+                  </li>
+                  {Object.entries(
+                    report.metrics_snapshot.methodology,
+                  ).map(([key, value]) => (
+                    <li key={key}>
+                      <span className="font-mono text-xs text-slate-400">
+                        {key}
+                      </span>
+                      : {value}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div>
+                <h3 className="mb-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Kaynaklar
+                </h3>
+                <ReferenceList registry={registry} />
+              </div>
+            </Disclosure>
+          </>
+        ) : report.status === 'completed' ? (
+          <Alert tone="warning" title="Anlatı bulunamadı">
+            Bu rapor tamamlandı olarak işaretlenmiş ancak kayıtlı bir
+            anlatı bulunmuyor. Raporu yeniden oluşturmayı deneyin.
+          </Alert>
+        ) : null}
+      </div>
+
+      <WeeklyReportPrintSummary report={report} />
 
       <ConfirmDialog
         open={confirmDelete}
@@ -1272,6 +1546,6 @@ export function WeeklyReportPage() {
           </>
         }
       />
-    </div>
+    </>
   )
 }

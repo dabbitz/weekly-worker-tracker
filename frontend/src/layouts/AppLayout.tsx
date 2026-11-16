@@ -141,7 +141,7 @@ export function AppLayout() {
   }, [location.pathname])
 
   return (
-    <div className="min-h-screen bg-worktrack-canvas">
+    <div className="min-h-screen bg-worktrack-canvas print:min-h-0">
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-[110] focus:rounded-lg focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:shadow-lg"
@@ -175,7 +175,7 @@ export function AppLayout() {
         </div>
       ) : null}
 
-      <div className="lg:pl-64">
+      <div className="lg:pl-64 print:pl-0">
         <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-worktrack-line bg-white/90 px-4 backdrop-blur sm:px-6 lg:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <button

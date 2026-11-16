@@ -100,8 +100,30 @@ dialog::backdrop {
   }
 }
 
+@page {
+  size: A4 portrait;
+  margin: 10mm 12mm;
+}
+
+/* The dedicated one-page summary is only rendered for printing. */
+.print-report {
+  display: none;
+}
+
 @media print {
+  /* Screen sizing must not follow the content into print. In paged
+     media 100vh is measured against the full page box, not the
+     printable area, so any viewport-height container would overflow the
+     bottom margin and produce an extra empty page. */
+  html,
   body {
+    height: auto !important;
+    min-height: 0 !important;
+  }
+
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
     background: white !important;
   }
 
@@ -123,5 +145,58 @@ dialog::backdrop {
 
   .table-shell {
     overflow: visible !important;
+  }
+
+  /* The print-only one-page summary uses a compact, readable scale. */
+  .print-report {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    color: #0f172a;
+    font-size: 9pt;
+    line-height: 1.35;
+  }
+
+  /* A trailing margin can spill past the page box and add a blank page. */
+  .print-report > :last-child {
+    margin-bottom: 0 !important;
+  }
+
+  /* Keep blocks intact, but never reserve the whole page for a block
+     that already fits inside the printable area. */
+  .print-report section,
+  .print-report header,
+  .print-report footer,
+  .print-report tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-report h1 {
+    font-size: 15pt;
+  }
+
+  .print-report h2 {
+    font-size: 9.5pt;
+  }
+
+  .print-report p,
+  .print-report li {
+    line-height: 1.35;
+  }
+
+  .print-report table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .print-report th,
+  .print-report td {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 2px 4px;
+    font-size: 8.5pt;
+    line-height: 1.25;
+    text-align: left;
+    vertical-align: top;
   }
 }
