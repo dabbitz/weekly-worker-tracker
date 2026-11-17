@@ -103,3 +103,7 @@ async def root():
         "health": "/api/health",
         "docs": "/docs",
     }
+
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    return {"status": "ok"}
