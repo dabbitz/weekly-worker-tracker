@@ -11,6 +11,10 @@ from aiogram.fsm.state import State, StatesGroup
 class ReportFlow(StatesGroup):
     """States of one employee report draft."""
 
+    # An unprompted report is preserved while the employee picks one of
+    # several assigned tasks. The message is not analysed before this.
+    choosing_task = State()
+
     # A task was selected; waiting for the employee's report text.
     waiting_for_report = State()
 

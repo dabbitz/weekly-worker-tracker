@@ -561,7 +561,6 @@ async def main():
     finally:
 
         await extractor.close()
-        await transcriber.close()
         logging.info("AI service closed.")
 
 

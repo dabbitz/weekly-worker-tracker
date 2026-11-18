@@ -283,6 +283,15 @@ def preview_callbacks(markup) -> list[str]:
     ]
 
 
+def find_callback(markup, prefix: str) -> str:
+    for value in preview_callbacks(markup):
+        if value.startswith(prefix):
+            return value
+    raise AssertionError(
+        f"Callback {prefix!r} not found in {preview_callbacks(markup)}"
+    )
+
+
 async def open_field_edit(bot, state, telegram_id: int, field: str) -> None:
     await handlers.edit_menu_handler(
         FakeCallback(
@@ -2163,11 +2172,277 @@ async def test_plain_private_message_auto_reports_single_task(session):
     assert update_row.original_message == REPORT_TEXT
 
 
-async def test_plain_message_with_multiple_tasks_requires_choice(session):
+async def test_plain_message_with_multiple_tasks_offers_task_buttons(
+    session,
+):
     telegram_id = 7402
     employee_id = await seed_employee(
         session,
         "Çok Görevli Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    _, first_task_id = await seed_task(
+        session,
+        title="Birinci görev",
+        project_name="Birinci Proje",
+        employee_ids=(employee_id,),
+    )
+    _, second_task_id = await seed_task(
+        session,
+        title="İkinci görev",
+        project_name="İkinci Proje",
+        employee_ids=(employee_id,),
+    )
+    await seed_plan(
+        session,
+        second_task_id,
+        TODAY,
+        WEEK_END,
+        percentage=60,
+        description="İkinci hedef",
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=741,
+    )
+    await handlers.report_text_handler(message, state)
+
+    # Nothing is analysed before the employee picks a task.
+    assert extractor.calls == []
+    assert await state.get_state() == ReportFlow.choosing_task.state
+    assert await count_updates(session) == 0
+
+    data = await state.get_data()
+    token = data["selection_token"]
+    assert data["pending_kind"] == "text"
+    assert data["pending_text"] == REPORT_TEXT
+    assert data["source_message_id"] == 741
+
+    answer = message.answers[-1]
+    assert "Birinci görev" in answer["text"]
+    assert "Birinci Proje" in answer["text"]
+    assert "İkinci görev" in answer["text"]
+    assert "İkinci Proje" in answer["text"]
+
+    callbacks = preview_callbacks(answer["reply_markup"])
+    assert f"pending:task:{token}:{first_task_id}" in callbacks
+    assert f"pending:task:{token}:{second_task_id}" in callbacks
+    assert f"pending:cancel:{token}" in callbacks
+
+    # One tap analyses the original text for the chosen task; the
+    # employee is never asked to resend it.
+    callback = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{second_task_id}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_task_selection_handler(callback, state)
+
+    assert extractor.calls == [REPORT_TEXT]
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    data = await state.get_data()
+    assert data["task_id"] == second_task_id
+    assert data["source_message_id"] == 741
+    assert data["original_message"] == REPORT_TEXT
+    assert data["plan"]["target_description"] == "İkinci hedef"
+
+    preview_text = callback.message.answers[-1]["text"]
+    assert "İkinci görev" in preview_text
+    assert "İkinci Proje" in preview_text
+    assert extractor.contexts[0]["task_title"] == "İkinci görev"
+    assert await count_updates(session) == 0
+
+
+async def test_pending_selection_preserves_source_message_id_and_date(
+    session,
+):
+    telegram_id = 7404
+    employee_id = await seed_employee(
+        session,
+        "Tarih Koruyan Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    _, task_id = await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    handlers.set_extractor(FakeExtractor(make_draft()))
+
+    original_date = datetime(2026, 11, 16, 9, 0, tzinfo=timezone.utc)
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=743,
+        date_value=original_date,
+    )
+    await handlers.report_text_handler(message, state)
+
+    token = (await state.get_data())["selection_token"]
+
+    callback = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{task_id}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+        message_id=903,
+    )
+    # The callback message is later; only the report's own metadata may
+    # be used for the stored record.
+    callback.message.date = datetime(
+        2026,
+        11,
+        23,
+        9,
+        0,
+        tzinfo=timezone.utc,
+    )
+    await handlers.pending_task_selection_handler(callback, state)
+
+    data = await state.get_data()
+    assert data["source_message_id"] == 743
+    assert data["source_message_date"] == original_date.isoformat()
+    # "cuma" resolves from Monday 16.11.2026, not from the callback.
+    assert data["reported_eta_date"] == EXPECTED_ETA.isoformat()
+
+    confirm = FakeCallback(
+        bot=bot,
+        data=f"rep:confirm:{data['confirmation_token']}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.confirm_handler(confirm, state)
+
+    assert await count_updates(session) == 1
+
+    await session.rollback()
+    update_row = await session.scalar(select(TaskUpdate))
+
+    assert update_row.telegram_message_id == 743
+    assert update_row.telegram_message_id != 903
+    assert update_row.reported_eta_date == EXPECTED_ETA
+
+
+async def test_stale_or_invalid_pending_task_selection_is_rejected(
+    session,
+):
+    telegram_id = 7405
+    employee_id = await seed_employee(
+        session,
+        "Bayat Seçim Çalışanı",
+        telegram_user_id=telegram_id,
+    )
+    _, first_task_id = await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    _, second_task_id = await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    other_employee_id = await seed_employee(
+        session,
+        "Başka Çalışan",
+        telegram_user_id=7406,
+    )
+    _, other_task_id = await seed_task(
+        session,
+        title="Başkasının görevi",
+        employee_ids=(other_employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=744,
+    )
+    await handlers.report_text_handler(message, state)
+
+    token = (await state.get_data())["selection_token"]
+
+    for callback_data in (
+        f"pending:task:deadbeef:{first_task_id}",
+        f"pending:task:{token}:not-a-number",
+        f"pending:task:{token}:{other_task_id}",
+    ):
+        callback = FakeCallback(
+            bot=bot,
+            data=callback_data,
+            user_id=telegram_id,
+            chat_id=telegram_id,
+        )
+        await handlers.pending_task_selection_handler(callback, state)
+
+        assert callback.answers[-1]["show_alert"] is True
+        assert extractor.calls == []
+        assert await state.get_state() == ReportFlow.choosing_task.state
+
+    # The unassigned task did not consume the preserved report.
+    assert (await state.get_data())["pending_text"] == REPORT_TEXT
+
+    valid = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{first_task_id}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_task_selection_handler(valid, state)
+
+    assert extractor.calls == [REPORT_TEXT]
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    # Replaying the same callback after processing is rejected and does
+    # not analyse or save the report a second time.
+    replay = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{first_task_id}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_task_selection_handler(replay, state)
+
+    assert replay.answers[-1]["show_alert"] is True
+    assert extractor.calls == [REPORT_TEXT]
+    assert await count_updates(session) == 0
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+
+async def test_cancel_discards_pending_text_report(session):
+    telegram_id = 7407
+    employee_id = await seed_employee(
+        session,
+        "İptal Eden Çalışan",
         telegram_user_id=telegram_id,
     )
     await seed_task(
@@ -2191,13 +2466,243 @@ async def test_plain_message_with_multiple_tasks_requires_choice(session):
         chat_id=telegram_id,
         user_id=telegram_id,
         text=REPORT_TEXT,
-        message_id=741,
+        message_id=745,
     )
     await handlers.report_text_handler(message, state)
 
-    assert "/gorevlerim" in message.answers[-1]["text"]
+    token = (await state.get_data())["selection_token"]
+
+    cancel = FakeCallback(
+        bot=bot,
+        data=f"pending:cancel:{token}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_cancel_handler(cancel, state)
+
     assert extractor.calls == []
+    assert await count_updates(session) == 0
     assert await state.get_state() is None
+    assert await state.get_data() == {}
+    assert "kayıt oluşturulmadı" in bot.edits[-1]["text"].lower()
+    assert cancel.answers[-1]["text"] == "Görev seçimi iptal edildi."
+
+    # A repeated cancellation callback is rejected safely.
+    repeated = FakeCallback(
+        bot=bot,
+        data=f"pending:cancel:{token}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_cancel_handler(repeated, state)
+
+    assert repeated.answers[-1]["show_alert"] is True
+    assert await state.get_state() is None
+    assert extractor.calls == []
+
+
+async def test_cancel_discards_pending_voice_report(session):
+    telegram_id = 7408
+    employee_id = await seed_employee(
+        session,
+        "Sesli İptal Çalışanı",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    transcriber = FakeTranscriber()
+    extractor = FakeExtractor(make_draft())
+    handlers.set_transcriber(transcriber)
+    handlers.set_extractor(extractor)
+
+    message = make_voice_message(
+        bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        message_id=746,
+    )
+    await handlers.report_voice_handler(message, state)
+
+    assert bot.downloads == []
+    assert transcriber.calls == []
+
+    token = (await state.get_data())["selection_token"]
+
+    cancel = FakeCallback(
+        bot=bot,
+        data=f"pending:cancel:{token}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_cancel_handler(cancel, state)
+
+    # Audio is neither downloaded nor transcribed and nothing is saved.
+    assert bot.downloads == []
+    assert transcriber.calls == []
+    assert extractor.calls == []
+    assert await count_updates(session) == 0
+    assert await state.get_state() is None
+    assert await state.get_data() == {}
+
+
+async def test_iptal_command_cancels_pending_selection(session):
+    telegram_id = 7409
+    employee_id = await seed_employee(
+        session,
+        "Komutla İptal Çalışanı",
+        telegram_user_id=telegram_id,
+    )
+    await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=747,
+    )
+    await handlers.report_text_handler(message, state)
+
+    original = await state.get_data()
+    token = original["selection_token"]
+
+    # A second message must not overwrite the pending report.
+    extra = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text="Başka bir rapor",
+        message_id=748,
+    )
+    await handlers.report_text_handler(extra, state)
+
+    assert formatting.PENDING_INPUT_GUIDANCE in extra.answers[-1]["text"]
+    assert await state.get_data() == original
+    assert await state.get_state() == ReportFlow.choosing_task.state
+    assert extractor.calls == []
+
+    iptal = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text="/iptal",
+        message_id=749,
+    )
+    await handlers.iptal_handler(iptal, state)
+
+    assert "iptal" in iptal.answers[-1]["text"].lower()
+    assert "kayıt oluşturulmadı" in iptal.answers[-1]["text"].lower()
+    assert await state.get_state() is None
+    assert await state.get_data() == {}
+    assert extractor.calls == []
+    assert await count_updates(session) == 0
+
+    # After cancellation a new report starts a fresh selection flow.
+    fresh = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=750,
+    )
+    await handlers.report_text_handler(fresh, state)
+
+    assert await state.get_state() == ReportFlow.choosing_task.state
+    new_data = await state.get_data()
+    assert new_data["selection_token"] != token
+    assert new_data["source_message_id"] == 750
+
+
+async def test_other_user_cannot_select_or_cancel_pending_report(session):
+    telegram_id = 7410
+    other_telegram_id = 7411
+    employee_id = await seed_employee(
+        session,
+        "Sahip Çalışan",
+        telegram_user_id=telegram_id,
+    )
+    await seed_employee(
+        session,
+        "Diğer Çalışan",
+        telegram_user_id=other_telegram_id,
+    )
+    _, task_id = await seed_task(
+        session,
+        title="Birinci görev",
+        employee_ids=(employee_id,),
+    )
+    await seed_task(
+        session,
+        title="İkinci görev",
+        employee_ids=(employee_id,),
+    )
+
+    bot = FakeBot()
+    state = await make_state(telegram_id)
+    extractor = FakeExtractor(make_draft())
+    handlers.set_extractor(extractor)
+
+    message = FakeMessage(
+        bot=bot,
+        chat_id=telegram_id,
+        user_id=telegram_id,
+        text=REPORT_TEXT,
+        message_id=749,
+    )
+    await handlers.report_text_handler(message, state)
+
+    pending = await state.get_data()
+    token = pending["selection_token"]
+
+    selection = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{task_id}",
+        user_id=other_telegram_id,
+        chat_id=other_telegram_id,
+    )
+    await handlers.pending_task_selection_handler(selection, state)
+
+    assert selection.answers[-1]["show_alert"] is True
+    assert extractor.calls == []
+    assert await state.get_state() == ReportFlow.choosing_task.state
+    assert await state.get_data() == pending
+
+    cancellation = FakeCallback(
+        bot=bot,
+        data=f"pending:cancel:{token}",
+        user_id=other_telegram_id,
+        chat_id=other_telegram_id,
+    )
+    await handlers.pending_cancel_handler(cancellation, state)
+
+    assert cancellation.answers[-1]["show_alert"] is True
+    assert await state.get_state() == ReportFlow.choosing_task.state
+    assert await state.get_data() == pending
     assert await count_updates(session) == 0
 
 
@@ -2337,21 +2842,25 @@ async def test_voice_message_auto_reports_single_task(session):
     assert update_row.completion_percentage == 70
 
 
-async def test_voice_message_with_multiple_tasks_requires_choice(session):
+async def test_voice_message_with_multiple_tasks_offers_task_buttons(
+    session,
+):
     telegram_id = 7502
     employee_id = await seed_employee(
         session,
         "Sesli Çok Görevli Çalışan",
         telegram_user_id=telegram_id,
     )
-    await seed_task(
+    _, first_task_id = await seed_task(
         session,
         title="Birinci görev",
+        project_name="Birinci Proje",
         employee_ids=(employee_id,),
     )
-    await seed_task(
+    _, second_task_id = await seed_task(
         session,
         title="İkinci görev",
+        project_name="İkinci Proje",
         employee_ids=(employee_id,),
     )
 
@@ -2370,10 +2879,48 @@ async def test_voice_message_with_multiple_tasks_requires_choice(session):
     )
     await handlers.report_voice_handler(message, state)
 
-    assert "/gorevlerim" in message.answers[-1]["text"]
+    # The audio is not fetched or transcribed before the selection.
+    assert bot.downloads == []
     assert transcriber.calls == []
     assert extractor.calls == []
-    assert await state.get_state() is None
+    assert await count_updates(session) == 0
+    assert await state.get_state() == ReportFlow.choosing_task.state
+
+    data = await state.get_data()
+    token = data["selection_token"]
+    assert data["pending_kind"] == "voice"
+    assert data["pending_voice_file_id"] == message.voice.file_id
+    assert data["source_message_id"] == 752
+
+    answer = message.answers[-1]
+    assert "Birinci Proje" in answer["text"]
+    assert "İkinci Proje" in answer["text"]
+    callbacks = preview_callbacks(answer["reply_markup"])
+    assert f"pending:task:{token}:{first_task_id}" in callbacks
+    assert f"pending:task:{token}:{second_task_id}" in callbacks
+    assert f"pending:cancel:{token}" in callbacks
+
+    callback = FakeCallback(
+        bot=bot,
+        data=f"pending:task:{token}:{first_task_id}",
+        user_id=telegram_id,
+        chat_id=telegram_id,
+    )
+    await handlers.pending_task_selection_handler(callback, state)
+
+    # Now the preserved voice note is downloaded once and transcribed.
+    assert len(bot.downloads) == 1
+    assert bot.downloads[0].file_id == message.voice.file_id
+    assert len(transcriber.calls) == 1
+    assert transcriber.calls[0]["audio"] == bot.download_bytes
+    assert extractor.calls == [VOICE_TRANSCRIPT]
+    assert await state.get_state() == ReportFlow.reviewing.state
+
+    data = await state.get_data()
+    assert data["task_id"] == first_task_id
+    assert data["source_message_id"] == 752
+    assert data["original_message"] == VOICE_TRANSCRIPT
+    assert "Birinci görev" in callback.message.answers[-1]["text"]
     assert await count_updates(session) == 0
 
 

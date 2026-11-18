@@ -6,10 +6,15 @@ plan is stored as a serializable snapshot. At confirmation time the
 current context must still match that snapshot.
 """
 
+import secrets
+
 from app.services.employee_work_service import (
     EmployeeTaskContext,
     EmployeeWeeklyPlan,
 )
+
+PENDING_KIND_TEXT = "text"
+PENDING_KIND_VOICE = "voice"
 
 
 def plan_to_data(plan: EmployeeWeeklyPlan | None) -> dict | None:
@@ -54,6 +59,52 @@ def selection_data(
         "field_to_edit": None,
         "preview_message_id": None,
     }
+
+
+def pending_selection_data(
+    *,
+    telegram_user_id: int,
+    chat_id: int,
+    token: str,
+    source_message_id: int,
+    source_message_date: str,
+    kind: str,
+    text: str | None = None,
+    voice_file_id: str | None = None,
+    voice_duration: int | None = None,
+    voice_file_size: int | None = None,
+) -> dict:
+    """Preserve an unprompted report while its task is chosen.
+
+    Only Telegram metadata is stored. The report text itself is kept for
+    text messages; a voice note is kept as its ``file_id`` so the audio
+    is downloaded and transcribed only after the task is selected.
+    """
+
+    return {
+        "telegram_user_id": telegram_user_id,
+        "chat_id": chat_id,
+        "selection_token": token,
+        "source_message_id": source_message_id,
+        "source_message_date": source_message_date,
+        "pending_kind": kind,
+        "pending_text": text,
+        "pending_voice_file_id": voice_file_id,
+        "pending_voice_duration": voice_duration,
+        "pending_voice_file_size": voice_file_size,
+    }
+
+
+def pending_token_matches(data: dict, token: str) -> bool:
+    """Return True when a callback belongs to this pending selection."""
+
+    expected = data.get("selection_token") or ""
+
+    return (
+        bool(expected)
+        and bool(token)
+        and secrets.compare_digest(token, expected)
+    )
 
 
 def context_matches_selection(

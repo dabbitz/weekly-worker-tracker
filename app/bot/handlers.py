@@ -32,7 +32,11 @@ from app.bot.drafts import (
     draft_from_data,
 )
 from app.bot.selection import (
+    PENDING_KIND_TEXT,
+    PENDING_KIND_VOICE,
     context_matches_selection,
+    pending_selection_data,
+    pending_token_matches,
     plan_to_data,
     selection_data,
 )
@@ -66,6 +70,66 @@ _transcriber = None
 VOICE_MIME_TYPE = "audio/ogg"
 MAX_VOICE_DURATION_SECONDS = 180
 MAX_VOICE_FILE_SIZE_BYTES = 5 * 1024 * 1024
+
+
+class _PreservedVoice:
+    """Voice metadata held in FSM data while the task is chosen.
+
+    Only the Telegram ``file_id`` (and its small metadata) is kept; the
+    audio bytes are downloaded after the employee selects a task.
+    """
+
+    def __init__(
+        self,
+        *,
+        file_id: str,
+        duration: int | None = None,
+        file_size: int | None = None,
+        mime_type: str = VOICE_MIME_TYPE,
+    ):
+        self.file_id = file_id
+        self.duration = duration
+        self.file_size = file_size
+        self.mime_type = mime_type
+
+
+class _PreservedReportMessage:
+    """Message-shaped view of a report sent before task selection.
+
+    The AI pipeline reads the original message id, date and payload.
+    Replies go through the selection callback's chat, because the
+    original message object is no longer available.
+    """
+
+    def __init__(
+        self,
+        *,
+        bot,
+        chat,
+        from_user,
+        message_id: int,
+        date: datetime,
+        text: str | None = None,
+        voice=None,
+        answer_target,
+    ):
+        self.bot = bot
+        self.chat = chat
+        self.from_user = from_user
+        self.message_id = message_id
+        self.date = date
+        self.text = text
+        self.voice = voice
+        self.audio = None
+        self.video_note = None
+        self._answer_target = answer_target
+
+    async def answer(self, text: str, reply_markup=None, **kwargs):
+        return await self._answer_target.answer(
+            text,
+            reply_markup=reply_markup,
+            **kwargs,
+        )
 
 
 def set_extractor(extractor) -> None:
@@ -200,6 +264,24 @@ async def _clear_and_replace(
     await _edit_or_send(callback, data, text, reply_markup=None)
 
 
+async def _replace_callback_message(
+    callback: CallbackQuery,
+    text: str,
+) -> None:
+    """Replace the tapped message and drop its inline keyboard."""
+
+    try:
+        await callback.bot.edit_message_text(
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            text=text,
+            reply_markup=None,
+        )
+    except Exception:
+        logger.warning("Could not replace the task selection message.")
+        await callback.message.answer(text)
+
+
 async def _remove_previous_keyboard(
     message: Message,
     data: dict,
@@ -310,6 +392,34 @@ async def gorevlerim_handler(
     )
 
 
+@router.message(Command("iptal"))
+async def iptal_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Cancel a pending task selection without touching other flows."""
+
+    if message.from_user is None:
+        return
+
+    if message.chat.type != "private":
+        await message.answer(formatting.PRIVATE_ONLY)
+        return
+
+    data = await state.get_data()
+    current = await state.get_state()
+
+    if (
+        _state_is(current, ReportFlow.choosing_task)
+        and _matches_flow(data, message.from_user.id, message.chat.id)
+    ):
+        await state.clear()
+        await message.answer(formatting.PENDING_CANCEL_TEXT)
+        return
+
+    await message.answer(formatting.NO_PENDING_SELECTION)
+
+
 @router.callback_query(F.data.startswith("task:"))
 async def task_selection_handler(
     callback: CallbackQuery,
@@ -391,6 +501,253 @@ async def task_selection_handler(
         await callback.message.answer(prompt)
 
 
+@router.callback_query(F.data.startswith("pending:task:"))
+async def pending_task_selection_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Analyse a preserved report against the task chosen with one tap."""
+
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    parts = (callback.data or "").split(":")
+    token = parts[2] if len(parts) == 4 else ""
+    raw_task_id = parts[3] if len(parts) == 4 else ""
+
+    try:
+        task_id = int(raw_task_id)
+    except ValueError:
+        task_id = None
+
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        # Never clear another employee's pending selection.
+        await callback.answer(
+            "Bu görev seçimi bulunamadı veya size ait değil.",
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.choosing_task,
+    ):
+        await callback.answer(
+            "Bu görev seçimi artık geçerli değil. Lütfen raporunuzu "
+            "yeniden gönderin.",
+            show_alert=True,
+        )
+        return
+
+    if task_id is None or not pending_token_matches(data, token):
+        await callback.answer(
+            "Görev seçimi geçersiz veya eski. Lütfen güncel "
+            "butonları kullanın.",
+            show_alert=True,
+        )
+        return
+
+    kind = data.get("pending_kind")
+    source_message_id = data.get("source_message_id")
+    source_message_date = data.get("source_message_date")
+
+    if source_message_id is None or source_message_date is None:
+        await state.clear()
+        await callback.answer(
+            "Bekleyen rapor bulunamadı. Lütfen raporunuzu yeniden "
+            "gönderin.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        source_date = datetime.fromisoformat(source_message_date)
+    except (TypeError, ValueError):
+        await state.clear()
+        await callback.answer(
+            "Bekleyen rapor bilgisi geçersiz. Lütfen raporunuzu "
+            "yeniden gönderin.",
+            show_alert=True,
+        )
+        return
+
+    today = _today()
+
+    async with SessionLocal() as session:
+        employee = await get_active_employee_by_telegram_id(
+            session,
+            callback.from_user.id,
+        )
+
+        if employee is None:
+            await state.clear()
+            await callback.answer(
+                "Aktif çalışan kaydı bulunamadı.",
+                show_alert=True,
+            )
+            await callback.message.answer(formatting.REGISTER_GUIDANCE)
+            return
+
+        try:
+            context = await get_task_context(
+                session,
+                employee.id,
+                task_id,
+                today,
+            )
+        except NotFoundError:
+            # Keep the pending report so another assigned task can be
+            # chosen; the stale task itself is rejected.
+            await callback.answer(
+                "Görev bulunamadı veya bu göreve atanmış değilsiniz.",
+                show_alert=True,
+            )
+            return
+
+    source_text = data.get("pending_text") or ""
+    voice = None
+
+    if kind == PENDING_KIND_TEXT:
+        if not source_text.strip():
+            await state.clear()
+            await callback.answer(
+                "Bekleyen rapor metni bulunamadı. Lütfen raporunuzu "
+                "yeniden gönderin.",
+                show_alert=True,
+            )
+            return
+    elif kind == PENDING_KIND_VOICE:
+        file_id = data.get("pending_voice_file_id")
+
+        if not file_id:
+            await state.clear()
+            await callback.answer(
+                "Bekleyen sesli mesaj bulunamadı. Lütfen sesli "
+                "mesajınızı yeniden gönderin.",
+                show_alert=True,
+            )
+            return
+
+        voice = _PreservedVoice(
+            file_id=file_id,
+            duration=data.get("pending_voice_duration"),
+            file_size=data.get("pending_voice_file_size"),
+        )
+    else:
+        await state.clear()
+        await callback.answer(
+            "Bekleyen rapor bilgisi geçersiz. Lütfen raporunuzu "
+            "yeniden gönderin.",
+            show_alert=True,
+        )
+        return
+
+    # The pending payload is replaced by the selected task snapshot, so
+    # it cannot be processed twice and no longer occupies the FSM.
+    selection = selection_data(
+        context,
+        telegram_user_id=callback.from_user.id,
+        chat_id=callback.message.chat.id,
+    )
+
+    await state.set_data(selection)
+    await state.set_state(ReportFlow.waiting_for_report)
+
+    await _replace_callback_message(
+        callback,
+        formatting.task_selected_text(context),
+    )
+    await callback.answer("Görev seçildi.")
+
+    preserved = _PreservedReportMessage(
+        bot=callback.bot,
+        chat=callback.message.chat,
+        from_user=callback.from_user,
+        message_id=source_message_id,
+        date=source_date,
+        text=source_text or None,
+        voice=voice,
+        answer_target=callback.message,
+    )
+
+    if kind == PENDING_KIND_VOICE:
+        await _transcribe_and_preview(
+            preserved,
+            state,
+            selection,
+            context,
+            today,
+        )
+        return
+
+    await _analyze_and_preview(
+        preserved,
+        state,
+        selection,
+        context,
+        source_text,
+        today,
+    )
+
+
+@router.callback_query(F.data.startswith("pending:cancel:"))
+async def pending_cancel_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Discard a preserved report without analysing or saving it."""
+
+    if not _callback_allowed(callback):
+        await _reject_non_private(callback)
+        return
+
+    token = (callback.data or "").split(":", 2)[-1]
+    data = await state.get_data()
+
+    if not data or not _matches_flow(
+        data,
+        callback.from_user.id,
+        callback.message.chat.id,
+    ):
+        await callback.answer(
+            "İptal edilecek bir rapor seçimi bulunamadı.",
+            show_alert=True,
+        )
+        return
+
+    if not _state_is(
+        await state.get_state(),
+        ReportFlow.choosing_task,
+    ):
+        await callback.answer(
+            "Bu iptal bağlantısı artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    if not pending_token_matches(data, token):
+        await callback.answer(
+            "Bu iptal bağlantısı artık geçerli değil.",
+            show_alert=True,
+        )
+        return
+
+    await state.clear()
+
+    await _replace_callback_message(
+        callback,
+        formatting.PENDING_CANCEL_TEXT,
+    )
+    await callback.answer("Görev seçimi iptal edildi.")
+
+
 @router.message(F.text)
 async def report_text_handler(
     message: Message,
@@ -404,6 +761,11 @@ async def report_text_handler(
         return
 
     current = await state.get_state()
+
+    if _state_is(current, ReportFlow.choosing_task):
+        # A pending report must not be silently replaced.
+        await message.answer(formatting.PENDING_INPUT_GUIDANCE)
+        return
 
     if _state_is(current, ReportFlow.waiting_for_report):
         await _handle_report_text(message, state)
@@ -455,6 +817,66 @@ def _has_work_content(draft: WorkUpdate) -> bool:
     )
 
 
+async def _start_pending_selection(
+    message: Message,
+    state: FSMContext,
+    tasks,
+    *,
+    kind: str,
+    text: str | None = None,
+) -> None:
+    """Preserve the report and ask which assigned task it belongs to.
+
+    Nothing is analysed yet. For a voice note only its Telegram file id
+    and metadata are held, so the audio is fetched after the selection.
+    """
+
+    voice_file_id = None
+    voice_duration = None
+    voice_file_size = None
+
+    if kind == PENDING_KIND_VOICE:
+        voice = message.voice
+        limit_message = _voice_limit_message(voice)
+
+        if limit_message is not None:
+            await message.answer(limit_message)
+            return
+
+        voice_file_id = getattr(voice, "file_id", None)
+
+        if not voice_file_id:
+            await message.answer(formatting.VOICE_DOWNLOAD_FAILED)
+            return
+
+        voice_duration = getattr(voice, "duration", None)
+        voice_file_size = getattr(voice, "file_size", None)
+
+    token = secrets.token_hex(4)
+    today = _today()
+
+    data = pending_selection_data(
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        token=token,
+        source_message_id=message.message_id,
+        source_message_date=message.date.isoformat(),
+        kind=kind,
+        text=text,
+        voice_file_id=voice_file_id,
+        voice_duration=voice_duration,
+        voice_file_size=voice_file_size,
+    )
+
+    await state.set_data(data)
+    await state.set_state(ReportFlow.choosing_task)
+
+    await message.answer(
+        formatting.format_pending_task_choice_text(tasks, today),
+        reply_markup=formatting.pending_task_keyboard(tasks, token),
+    )
+
+
 async def _handle_unprompted_text(
     message: Message,
     state: FSMContext,
@@ -463,8 +885,9 @@ async def _handle_unprompted_text(
 
     With exactly one assigned task the message is analysed for that
     task directly, so employees never have to use a command for their
-    regular report. Several tasks require an explicit choice through
-    ``/gorevlerim``; no task means there is nothing to report against.
+    regular report. Several tasks keep the message in FSM data and ask
+    for one tap on an inline task button; no task means there is
+    nothing to report against.
     """
 
     text = (message.text or "").strip()
@@ -502,11 +925,12 @@ async def _handle_unprompted_text(
         return
 
     if len(tasks) > 1:
-        await message.answer(
-            "Birden fazla göreviniz var ve mesajı hangi göreve ait "
-            "olduğu otomatik seçilemiyor.\n\n"
-            "Lütfen /gorevlerim komutuyla rapor göndereceğiniz "
-            "görevi seçin."
+        await _start_pending_selection(
+            message,
+            state,
+            tasks,
+            kind=PENDING_KIND_TEXT,
+            text=text,
         )
         return
 
@@ -969,8 +1393,9 @@ async def _handle_unprompted_voice(
     """Route a voice message sent without a selected task.
 
     The same rules as plain text apply: a single assigned task is chosen
-    automatically, several tasks require ``/gorevlerim``, and no task
-    means there is nothing to report against.
+    automatically, several tasks keep the voice file id and ask for one
+    tap on an inline task button, and no task means there is nothing to
+    report against.
     """
 
     today = _today()
@@ -996,11 +1421,11 @@ async def _handle_unprompted_voice(
         return
 
     if len(tasks) > 1:
-        await message.answer(
-            "Birden fazla göreviniz var ve sesli mesajın hangi göreve "
-            "ait olduğu otomatik seçilemiyor.\n\n"
-            "Lütfen /gorevlerim komutuyla rapor göndereceğiniz "
-            "görevi seçin."
+        await _start_pending_selection(
+            message,
+            state,
+            tasks,
+            kind=PENDING_KIND_VOICE,
         )
         return
 
@@ -1656,6 +2081,11 @@ async def report_voice_handler(
         return
 
     current = await state.get_state()
+
+    if _state_is(current, ReportFlow.choosing_task):
+        # A pending report must not be silently replaced.
+        await message.answer(formatting.PENDING_INPUT_GUIDANCE)
+        return
 
     if _state_is(current, ReportFlow.waiting_for_report):
         await _handle_report_voice(message, state)

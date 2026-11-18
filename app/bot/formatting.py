@@ -232,6 +232,109 @@ def task_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# An unprompted report with several assigned tasks is preserved while
+# the employee picks one, so the message never has to be resent.
+
+PENDING_CANCEL_TEXT = (
+    "Görev seçimi iptal edildi. Bekleyen raporunuz atıldı ve hiçbir "
+    "kayıt oluşturulmadı.\n\n"
+    "Yeni bir rapor göndermek için mesajınızı yeniden yazabilir veya "
+    "/gorevlerim komutunu kullanabilirsiniz."
+)
+
+NO_PENDING_SELECTION = (
+    "İptal edilecek bekleyen bir rapor seçimi bulunamadı."
+)
+
+PENDING_INPUT_GUIDANCE = (
+    "Devam eden bir görev seçimi var. Lütfen yukarıdaki görev "
+    "butonlarından birini seçin veya 'İptal' butonuna basın.\n\n"
+    "Bu sırada gönderdiğiniz yeni mesaj işlenmedi."
+)
+
+
+def format_pending_task_choice_text(
+    contexts: Iterable[EmployeeTaskContext],
+    today: date,
+) -> str:
+    items = list(contexts)
+    shown = items[:MAX_LISTED_TASKS]
+
+    lines = [
+        f"RAPOR İÇİN GÖREV SEÇİMİ — {format_date(today)}",
+        "",
+        "Mesajınız alındı. Birden fazla göreviniz olduğu için raporun "
+        "hangi göreve ait olduğu otomatik seçilemiyor.",
+        "Aşağıdan görevi seçin; mesajınızı yeniden göndermeniz "
+        "gerekmiyor.",
+        "",
+    ]
+
+    for index, context in enumerate(shown, start=1):
+        lines.append(f"{index}) {_shorten(context.title, 100)}")
+        lines.append(f"Proje: {_shorten(context.project_name, 80)}")
+
+    if len(items) > len(shown):
+        lines.append("")
+        lines.append(
+            f"Not: İlk {MAX_LISTED_TASKS} görev gösteriliyor."
+        )
+
+    lines.append("")
+    lines.append(
+        "Bu raporu göndermek istemiyorsanız 'İptal' butonunu "
+        "kullanabilirsiniz."
+    )
+
+    return "\n".join(lines).strip()
+
+
+def pending_task_keyboard(
+    contexts: Iterable[EmployeeTaskContext],
+    token: str,
+) -> InlineKeyboardMarkup:
+    rows = []
+
+    for index, context in enumerate(
+        list(contexts)[:MAX_LISTED_TASKS],
+        start=1,
+    ):
+        label = f"{index}. {_shorten(context.title, 30)}"
+        project = (context.project_name or "").strip()
+
+        if project:
+            label = f"{label} — {_shorten(project, 20)}"
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=(
+                        f"pending:task:{token}:{context.task_id}"
+                    ),
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="İptal",
+                callback_data=f"pending:cancel:{token}",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def task_selected_text(context: EmployeeTaskContext) -> str:
+    return (
+        f"Görev seçildi: {_shorten(context.title, 100)}\n"
+        f"Proje: {_shorten(context.project_name, 80)}"
+    )
+
+
 def _task_header(data: dict) -> list[str]:
     lines = [
         f"Görev: {data.get('task_title') or 'Belirtilmedi'}",
